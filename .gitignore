@@ -1,3 +1,44 @@
+# =====================================
+# R Script: ignora Dati e Risultati
+# =====================================
+
+# MF-TPRF
+MF-TPRF/EA/data/
+MF-TPRF/EA/results/
+
+# Matrix MF-TPRF
+T-MF-TPRF/EA/data/
+T-MF-TPRF/EA/results/
+
+# =========================
+# old: ignore old files
+# =========================
+
+# Ignora tutto sotto LaTeX/
+old/*
+literature/*
+
+# =========================
+# LaTeX: tieni SOLO main.pdf
+# =========================
+
+# Ignora tutto sotto LaTeX/
+LaTeX/*
+
+# ...ma NON ignorare la cartella output
+!LaTeX/output/
+
+# Dentro output ignora tutto...
+LaTeX/output/*
+
+# ...tranne il PDF finale
+!LaTeX/output/main.pdf
+
+
+# =====================================
+# R Code: ignora SOLO file temporanei
+# =====================================
+
 # History files
 .Rhistory
 .Rapp.history
