@@ -2,20 +2,25 @@
 # R Script: ignora Dati e Risultati
 # =====================================
 
+# Data
+code/data/
+
 # MF-TPRF
-MF-TPRF/EA/data/
-MF-TPRF/EA/results/
+code/Vector_FM/MF-TPRF/results/
 
 # Matrix MF-TPRF
-T-MF-TPRF/EA/data/
-T-MF-TPRF/EA/results/
+code/Matrix_FM/Matrix_MF-TPRF/results/
 
+# DFM
+code/Vector_FM/DFM/results/
+
+# DMFM
+code/Matrix_FM/DMFM/results/
 # =========================
 # old: ignore old files
 # =========================
 
 # Ignora tutto sotto LaTeX/
-old/*
 literature/*
 
 # =========================
