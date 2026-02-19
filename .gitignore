@@ -29,15 +29,15 @@ literature/*
 
 # Ignora tutto sotto LaTeX/
 LaTeX/*
-
+LaTeX_TPRF/*
 # ...ma NON ignorare la cartella output
-!LaTeX/output/
+# !LaTeX/output/
 
 # Dentro output ignora tutto...
-LaTeX/output/*
+# LaTeX/output/*
 
 # ...tranne il PDF finale
-!LaTeX/output/main.pdf
+# !LaTeX/output/main.pdf
 
 
 # =====================================
