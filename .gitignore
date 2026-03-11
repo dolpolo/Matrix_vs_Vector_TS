@@ -16,6 +16,10 @@ code/Vector_FM/DFM/results/
 
 # DMFM
 code/Matrix_FM/DMFM/results/
+
+# Monte Carlo Simulation
+code/simulation/results/
+
 # =========================
 # old: ignore old files
 # =========================
