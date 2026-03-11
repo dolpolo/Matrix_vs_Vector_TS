@@ -115,280 +115,10 @@ mfm.f <- function(Y_std, W, kmax, max_iter = 20) {
   return(c(k1_new, k2_new))
 }
 
-# ----
-
-# Modified version of mfm.f to select k2 (column factors) only.
-# - Assumes k1 = 1 (row factor) is fixed.
-# - Performs eigen decomposition only on column covariances.
-# - Estimates column loadings and projects onto them to compute reduced data.
-# - Computes eigenvalue ratios to choose optimal k2.
-
-dfm.f.vec <- function(Y_std, W, kmax, max_iter = 100) {
-  # Assumiamo che Y_std abbia dimensione T x 1 x p2
-  n <- dim(Y_std)[1]
-  p2 <- dim(Y_std)[3]
-  k2_old <- kmax[2]
-  
-  c <- 0.01
-  delta <- max(1 / sqrt(n * p2), 1 / p2)
-  
-  for (iter in 1:max_iter) {
-    imputation <- mfm.cl.vec(Y_std, W, c(1, k2_old))
-    X <- imputation$Y_imputed
-    
-    # Step: Covarianza sulle colonne
-    M2.h <- matrix(0, p2, p2)
-    for (t in 1:n) {
-      row_vec <- as.matrix(X[t, 1, ])
-      M2.h <- M2.h + row_vec %*% t(row_vec)
-    }
-    M2.h <- M2.h / (n * p2)
-    
-    eig <- eigen(M2.h, symmetric = TRUE)
-    eigvals_M2 <- eig$values
-    variance_explained_M2 <- eigvals_M2 / sum(eigvals_M2)
-    
-    ER2 <- eigvals_M2[-length(eigvals_M2)] / (eigvals_M2[-1] + c * delta)
-    if (length(ER2) == 0) {
-      warning("ER2 vuoto: k2 impostato a 1")
-      k2_new <- 1
-    } else {
-      k2_new <- which.max(ER2)
-    }
-    
-    cat(sprintf("Iter %d: k2 = %d\n", iter, k2_new))
-    
-    if (k2_new == k2_old || iter == max_iter) {
-      par(mfrow = c(1, 2))
-      
-      # Scree plot
-      bar_x2 <- barplot(eigvals_M2, col = "lightcoral", main = "Scree Plot - Column Factors",
-                        xlab = "Factor", ylab = "Eigenvalue")
-      lines(bar_x2, eigvals_M2, type = "b", pch = 19, col = "red")
-      
-      # Cumulative variance
-      plot(0:length(variance_explained_M2),
-           c(0, cumsum(variance_explained_M2)), type = "o", col = "red",
-           main = "Cumulative Variance - Column Factors",
-           xlab = "Number of Factors", ylab = "Cumulative Variance")
-      
-      par(mfrow = c(1, 1))
-      break
-    }
-    
-    k2_old <- k2_new
-  }
-  
-  return(c(1, k2_new))
-}
-
-
 
 # ==============================================================================
 # NUMBER OF FACTORS' LAGS
 # ==============================================================================
-
-#  somma i fattori ai lag precedenti e usa una sola matrice B per rappresentare 
-# l’effetto combinato dei p ritardi.
-
-factorize_bic_matrix_loglik_mar <- function(Y_std, W, k_hat, max_lag = 10, verbose = TRUE) {
-  imputation <- mfm.cl(Y_std, W, k_hat)
-  pe <- mfm.pe(imputation$Y_imputed, k_hat)
-  Factors <- pe$factor
-  
-  T <- dim(Factors)[1]
-  k1 <- dim(Factors)[2]
-  k2 <- dim(Factors)[3]
-  F_list <- lapply(1:T, function(t) Factors[t,,])
-  
-  bic_values <- numeric(max_lag)
-  aic_values <- numeric(max_lag)
-  loglik_values <- numeric(max_lag)
-  
-  for (p in 1:max_lag) {
-    n_obs <- T - p
-    A_list <- list()
-    B_list <- list()
-    P_sum <- matrix(0, k1, k1)
-    Q_sum <- matrix(0, k2, k2)
-    
-    # MAR(1) stimato tra F_t e F_{t-p} (solo un lag alla volta)
-    for (i in (p+1):T) {
-      Y <- F_list[[i]]
-      X <- F_list[[i - p]]
-      
-      svd_tmp <- svd(Y %*% X)
-      A_hat <- svd_tmp$u
-      B_hat <- svd_tmp$v
-      D_hat <- svd_tmp$d
-      
-      A <- A_hat %*% diag(sign(A_hat[1,]))  # orientamento
-      B <- diag(D_hat) %*% t(B_hat)
-      
-      E <- Y - A %*% X %*% t(B)
-      P_sum <- P_sum + E %*% solve(Q_sum + diag(k2)) %*% t(E)  # iniziale Q unit
-      Q_sum <- Q_sum + t(E) %*% solve(P_sum + diag(k1)) %*% E
-      
-      A_list[[i - p]] <- A
-      B_list[[i - p]] <- B
-    }
-    
-    # Stima finale P, Q
-    P_hat <- P_sum / n_obs
-    Q_hat <- Q_sum / n_obs
-    
-    # Calcolo log-likelihood matriciale
-    llk <- 0
-    for (i in (p+1):T) {
-      Y <- F_list[[i]]
-      X <- F_list[[i - p]]
-      A <- A_list[[i - p]]
-      B <- B_list[[i - p]]
-      E <- Y - A %*% X %*% t(B)
-      term <- tr(solve(P_hat) %*% E %*% solve(Q_hat) %*% t(E))
-      llk <- llk + term
-    }
-    
-    loglik <- - (n_obs * k1 * log(det(Q_hat)) + n_obs * k2 * log(det(P_hat)) + llk + n_obs * k1 * k2 * log(2*pi)) / 2
-    loglik_values[p] <- loglik
-    
-    # Numero parametri (A, B, P, Q)
-    num_params <- 2 * k1 * k2 + 0.5 * k1 * (k1 + 1) + 0.5 * k2 * (k2 + 1)
-    bic_values[p] <- -2 * loglik + log(n_obs) * num_params
-    aic_values[p] <- -2 * loglik + 2 * num_params
-  }
-  
-  best_p_bic <- which.min(bic_values)
-  best_p_aic <- which.min(aic_values)
-  
-  if (verbose) {
-    cat("BIC (matricial MAR):\n")
-    print(bic_values)
-    cat("Best lag (BIC):", best_p_bic, "\n")
-    cat("Best lag (AIC):", best_p_aic, "\n")
-    
-    df <- data.frame(
-      Lag = 1:max_lag,
-      BIC = bic_values,
-      AIC = aic_values
-    )
-    
-    # Plot
-    p1 <- ggplot(df, aes(x = Lag, y = BIC)) +
-      geom_line(color = "blue") +
-      geom_point(color = "blue") +
-      geom_vline(xintercept = best_p_bic, linetype = "dashed", color = "blue") +
-      ggtitle("BIC (MAR)") +
-      theme_minimal()
-    
-    p2 <- ggplot(df, aes(x = Lag, y = AIC)) +
-      geom_line(color = "red") +
-      geom_point(color = "red") +
-      geom_vline(xintercept = best_p_aic, linetype = "dashed", color = "red") +
-      ggtitle("AIC (MAR)") +
-      theme_minimal()
-    
-    print(p1 + p2)
-  }
-  
-  return(list(
-    Factors = Factors,
-    BIC = bic_values,
-    AIC = aic_values,
-    logLik = loglik_values,
-    best_lag_BIC = best_p_bic,
-    best_lag_AIC = best_p_aic
-  ))
-}
-
-# Qui ogni ritardo ha una matrice di regressione distinta. Il vettore dei fattori 
-# è spiegato da una concatenazione dei p vettori ritardati
-
-mar_model_selection <- function(Y_std, W, k_hat, max_lag = 10, verbose = TRUE) {
-  
-  imputation <- mfm.cl(Y_std, W, k_hat)
-  pe <- mfm.pe(imputation$Y_imputed, k_hat)
-  Factors <- pe$factor
-  
-  T <- dim(Factors)[1]
-  k1 <- dim(Factors)[2]
-  k2 <- dim(Factors)[3]
-  
-  F_list <- lapply(1:T, function(t) Factors[t,,])
-  
-  bic_values <- numeric(max_lag)
-  aic_values <- numeric(max_lag)
-  loglik_values <- numeric(max_lag)
-  
-  for (p in 1:max_lag) {
-    Y_list <- F_list[(p+1):T]
-    
-    # Costruisci la lista delle matrici X_t = [F_{t-1}, ..., F_{t-p}]
-    X_list <- lapply((p+1):T, function(t) {
-      do.call(cbind, lapply(1:p, function(lag) as.vector(F_list[[t - lag]])))
-    })
-    
-    Y_mat <- do.call(rbind, lapply(Y_list, function(m) as.vector(m)))
-    X_mat <- do.call(rbind, X_list)
-    
-    # Regressione multivariata: vec(F_t) = B * [vec(F_{t-1}); ... ; vec(F_{t-p})] + e
-    B_hat <- solve(t(X_mat) %*% X_mat) %*% t(X_mat) %*% as.matrix(Y_mat)
-    Res <- Y_mat - X_mat %*% B_hat
-    Sigma_hat <- cov(Res)
-    
-    n_obs <- T - p
-    loglik <- -0.5 * n_obs * (k1 * k2 * log(2 * pi) + log(det(Sigma_hat)) + 1)
-    loglik_values[p] <- loglik
-    
-    # Numero di parametri: p*(k1*k2)^2 + covarianza residuo (simm. pos def)
-    num_params <- p * (k1 * k2)^2 + 0.5 * k1 * k2 * (k1 * k2 + 1)
-    bic_values[p] <- -2 * loglik + log(n_obs) * num_params
-    aic_values[p] <- -2 * loglik + 2 * num_params
-  }
-  
-  best_p_bic <- which.min(bic_values)
-  best_p_aic <- which.min(aic_values)
-  
-  if (verbose) {
-    cat("MAR(p) - Model Selection\n")
-    cat("BIC values:\n"); print(bic_values)
-    cat("AIC values:\n"); print(aic_values)
-    cat("Best lag (BIC):", best_p_bic, "\n")
-    cat("Best lag (AIC):", best_p_aic, "\n")
-    
-    df <- data.frame(
-      Lag = 1:max_lag,
-      BIC = bic_values,
-      AIC = aic_values
-    )
-    
-    p1 <- ggplot(df, aes(x = Lag, y = BIC)) +
-      geom_line(color = "blue") +
-      geom_point(color = "blue") +
-      geom_vline(xintercept = best_p_bic, linetype = "dashed", color = "blue") +
-      scale_x_continuous(breaks = 1:max_lag) +
-      ggtitle("BIC vs Lag") +
-      theme_minimal()
-    
-    p2 <- ggplot(df, aes(x = Lag, y = AIC)) +
-      geom_line(color = "red") +
-      geom_point(color = "red") +
-      geom_vline(xintercept = best_p_aic, linetype = "dashed", color = "red") +
-      scale_x_continuous(breaks = 1:max_lag) +
-      ggtitle("AIC vs Lag") +
-      theme_minimal()
-    
-    print(p1 + p2)
-  }
-  
-  return(list(
-    BIC = bic_values,
-    AIC = aic_values,
-    logLik = loglik_values,
-    best_lag_BIC = best_p_bic,
-    best_lag_AIC = best_p_aic
-  ))
-}
 
 mar_model_selection_auto <- function(Y_std, W, k_hat, max_lag = 10, verbose = TRUE) {
   imputation <- mfm.cl(Y_std, W, k_hat)
@@ -483,159 +213,6 @@ mar_model_selection_auto <- function(Y_std, W, k_hat, max_lag = 10, verbose = TR
   ))
 }
 
-# Versione adattata per modelli vettoriali (k1 = 1)
-
-# Modified version of factorize_bic_matrix_loglik_mar for vector DFM.
-# - Uses mfm.cl.vec() and mfm.pe.vec() to obtain factors.
-# - Each F_t is treated as a 1 x k2 matrix.
-# - Matrix autoregression A_t, B_t estimated via SVD between F_t and F_{t-p}.
-# - BIC/AIC computed for varying MAR(p) lags.
-
-# === Funzione 1: MAR(1) matrix factor model - stima singolo lag ===
-factorize_bic_mar_vec <- function(Y_std, W, k_hat, max_lag = 10, verbose = TRUE) {
-  imputation <- mfm.cl.vec(Y_std, W, k_hat)
-  pe <- mfm.pe.vec(imputation$Y_imputed, k_hat)
-  Factors <- pe$factor
-  
-  T <- dim(Factors)[1]
-  k2 <- dim(Factors)[3]  # solo colonna
-  F_list <- lapply(1:T, function(t) Factors[t, 1, ])
-  
-  bic_values <- numeric(max_lag)
-  aic_values <- numeric(max_lag)
-  loglik_values <- numeric(max_lag)
-  
-  for (p in 1:max_lag) {
-    n_obs <- T - p
-    B_list <- list()
-    Q_sum <- matrix(0, k2, k2)
-    SSR <- 0
-    
-    for (i in (p+1):T) {
-      Y <- matrix(F_list[[i]], ncol = 1)
-      X <- matrix(F_list[[i - p]], ncol = 1)
-      
-      B_hat <- Y %*% solve(t(X) %*% X) %*% t(X)
-      E <- Y - B_hat %*% X
-      SSR <- SSR + t(E) %*% E
-      
-      B_list[[i - p]] <- B_hat
-    }
-    
-    Q_hat <- SSR / n_obs
-    
-    llk <- -0.5 * n_obs * (k2 * log(2 * pi) + log(det(Q_hat)) + 1)
-    loglik_values[p] <- llk
-    
-    num_params <- k2^2 + 0.5 * k2 * (k2 + 1)
-    bic_values[p] <- -2 * llk + log(n_obs) * num_params
-    aic_values[p] <- -2 * llk + 2 * num_params
-  }
-  
-  best_p_bic <- which.min(bic_values)
-  best_p_aic <- which.min(aic_values)
-  
-  if (verbose) {
-    df <- data.frame(Lag = 1:max_lag, BIC = bic_values, AIC = aic_values)
-    p1 <- ggplot(df, aes(x = Lag, y = BIC)) +
-      geom_line(color = "blue") +
-      geom_point(color = "blue") +
-      geom_vline(xintercept = best_p_bic, linetype = "dashed", color = "blue") +
-      ggtitle("BIC (DFM)") +
-      theme_minimal()
-    
-    p2 <- ggplot(df, aes(x = Lag, y = AIC)) +
-      geom_line(color = "red") +
-      geom_point(color = "red") +
-      geom_vline(xintercept = best_p_aic, linetype = "dashed", color = "red") +
-      ggtitle("AIC (DFM)") +
-      theme_minimal()
-    
-    print(p1 + p2)
-  }
-  
-  return(list(
-    Factors = Factors,
-    BIC = bic_values,
-    AIC = aic_values,
-    logLik = loglik_values,
-    best_lag_BIC = best_p_bic,
-    best_lag_AIC = best_p_aic
-  ))
-}
-
-# === Funzione 2: modello MAR(p) vettoriale ===
-
-# Modified version of mar_model_selection for vector DFM.
-# - Regresses vec(F_t) on stacked vec(F_{t-1}, ..., F_{t-p}) as in a MAR(p) model.
-# - Handles factor arrays of shape T x 1 x k2.
-# - Computes BIC and AIC to select optimal lag p.
-
-mar_model_selection_vec <- function(Y_std, W, k_hat, max_lag = 10, verbose = TRUE) {
-  imputation <- mfm.cl.vec(Y_std, W, k_hat)
-  pe <- mfm.pe.vec(imputation$Y_imputed, k_hat)
-  Factors <- pe$factor
-  
-  T <- dim(Factors)[1]
-  k2 <- dim(Factors)[3]
-  F_list <- lapply(1:T, function(t) Factors[t, 1, ])
-  
-  bic_values <- numeric(max_lag)
-  aic_values <- numeric(max_lag)
-  loglik_values <- numeric(max_lag)
-  
-  for (p in 1:max_lag) {
-    Y_list <- F_list[(p+1):T]
-    X_list <- lapply((p+1):T, function(t) {
-      do.call(cbind, lapply(1:p, function(lag) as.vector(F_list[[t - lag]])))
-    })
-    
-    Y_mat <- do.call(rbind, lapply(Y_list, matrix, nrow = 1))
-    X_mat <- do.call(rbind, lapply(X_list, matrix, nrow = 1))
-    
-    B_hat <- solve(t(X_mat) %*% X_mat) %*% t(X_mat) %*% Y_mat
-    Res <- Y_mat - X_mat %*% B_hat
-    Sigma_hat <- cov(Res)
-    
-    n_obs <- T - p
-    loglik <- -0.5 * n_obs * (k2 * log(2 * pi) + log(det(Sigma_hat)) + 1)
-    loglik_values[p] <- loglik
-    
-    num_params <- p * k2^2 + 0.5 * k2 * (k2 + 1)
-    bic_values[p] <- -2 * loglik + log(n_obs) * num_params
-    aic_values[p] <- -2 * loglik + 2 * num_params
-  }
-  
-  best_p_bic <- which.min(bic_values)
-  best_p_aic <- which.min(aic_values)
-  
-  if (verbose) {
-    df <- data.frame(Lag = 1:max_lag, BIC = bic_values, AIC = aic_values)
-    p1 <- ggplot(df, aes(x = Lag, y = BIC)) +
-      geom_line(color = "blue") +
-      geom_point(color = "blue") +
-      geom_vline(xintercept = best_p_bic, linetype = "dashed", color = "blue") +
-      ggtitle("BIC vs Lag (DFM)") +
-      theme_minimal()
-    
-    p2 <- ggplot(df, aes(x = Lag, y = AIC)) +
-      geom_line(color = "red") +
-      geom_point(color = "red") +
-      geom_vline(xintercept = best_p_aic, linetype = "dashed", color = "red") +
-      ggtitle("AIC vs Lag (DFM)") +
-      theme_minimal()
-    
-    print(p1 + p2)
-  }
-  
-  return(list(
-    BIC = bic_values,
-    AIC = aic_values,
-    logLik = loglik_values,
-    best_lag_BIC = best_p_bic,
-    best_lag_AIC = best_p_aic
-  ))
-}
 
 # ==============================================================================
 # IMPUTATION OF NAN
@@ -730,100 +307,6 @@ mfm.cl <- function(Y, W, r) {
   return(list(R = R_hat, C = C_hat, f = F_hat, Y_hat = Y_hat, Y_imputed = Y_imputed))
 }
 
-# ----
-
-# Modified version of mfm.cl for T x 1 x p2 data (vector DFM).
-# - Computes only column covariances (S_C), ignoring rows (S_R).
-# - Avoids slicing issues when p1 = 1.
-# - Estimates column loadings (C_hat) and factor matrix (F_hat).
-# - Performs imputation using: Y_hat[t,,] = R_hat %*% F_hat[t,,] %*% t(C_hat)
-#   with R_hat set as a 1-row identity matrix.
-
-mfm.cl.vec <- function(Y, W, r) {
-  # Dimensioni
-  n <- dim(Y)[1]   # T
-  d1 <- 1          # un solo paese
-  d2 <- dim(Y)[3]  # numero di variabili
-  r1 <- r[1]
-  r2 <- r[2]
-  
-  # Covarianze (S_R sarà scalare)
-  S_R <- matrix(0, 1, 1)
-  S_C <- matrix(0, d2, d2)
-  count_R <- matrix(0, 1, 1)
-  count_C <- matrix(0, d2, d2)
-  
-  for (t in 1:n) {
-    Y_t <- Y[t, 1, ]
-    W_t <- W[t, 1, ]
-    
-    # Mode-1: solo diagonale (unica riga)
-    S_R[1, 1] <- S_R[1, 1] + sum((Y_t * W_t)^2)
-    count_R[1, 1] <- count_R[1, 1] + sum(W_t)
-    
-    # Mode-2: colonne (variabili)
-    for (i in 1:d2) {
-      for (j in i:d2) {
-        if (W_t[i] == 1 && W_t[j] == 1) {
-          S_C[i, j] <- S_C[i, j] + Y_t[i] * Y_t[j]
-          count_C[i, j] <- count_C[i, j] + 1
-        }
-      }
-    }
-  }
-  
-  # Simmetrizza
-  S_C <- (S_C + t(S_C)) - diag(diag(S_C))
-  count_C <- (count_C + t(count_C)) - diag(diag(count_C))
-  
-  # Normalizza
-  if (count_R[1, 1] > 0) {
-    S_R[1, 1] <- S_R[1, 1] / count_R[1, 1]
-  }
-  S_C[count_C > 0] <- S_C[count_C > 0] / count_C[count_C > 0]
-  
-  # Autovettori
-  R_hat <- matrix(1, 1, r1)  # unico valore per r1 = 1
-  C_hat <- eigen(S_C, symmetric = TRUE)$vectors[, 1:r2, drop = FALSE]
-  
-  # Stima dei fattori
-  F_hat <- array(0, dim = c(n, r1, r2))
-  for (t in 1:n) {
-    Y_t <- as.vector(Y[t, 1, ])
-    W_t <- as.vector(W[t, 1, ])
-    Y_vec <- Y_t
-    W_vec <- W_t
-    
-    Q <- kronecker(C_hat, R_hat)
-    Q_obs <- Q[W_vec == 1, , drop = FALSE]
-    Y_obs <- Y_vec[W_vec == 1]
-    
-    if (length(Y_obs) >= r1 * r2) {
-      f_vec <- solve(t(Q_obs) %*% Q_obs) %*% t(Q_obs) %*% Y_obs
-      F_hat[t,,] <- matrix(f_vec, r1, r2)
-    }
-  }
-  
-  # Imputazione
-  Y_hat <- array(0, dim = c(n, 1, d2))
-  Y_imputed <- Y
-  for (t in 1:n) {
-    Y_hat[t, 1, ] <- R_hat %*% F_hat[t,,] %*% t(C_hat)
-    missing <- which(W[t, 1, ] == 0)
-    if (length(missing) > 0) {
-      Y_imputed[t, 1, missing] <- Y_hat[t, 1, missing]
-    }
-  }
-  
-  return(list(
-    R = R_hat,
-    C = C_hat,
-    f = F_hat,
-    Y_hat = Y_hat,
-    Y_imputed = Y_imputed
-  ))
-}
-
 
 # ==============================================================================
 # PROJECTED ESTIMATES
@@ -912,47 +395,6 @@ mfm.pe <- function(X, k){
   ))
 }
 
-# ----
-
-# Projected estimates for vector DFM.
-# - Assumes p1 = 1 (one row).
-# - Estimates column loadings (C.t) only.
-# - Factor matrix F.h[t,,] is computed as: F_t = X_t %*% C
-# - Reconstructed signal: S.h[t,,] = R %*% F_t %*% t(C), with R = 1-row identity.
-
-mfm.pe.vec <- function(X, k) {
-  n <- dim(X)[1]
-  p1 <- dim(X)[2]  # dovrebbe essere 1
-  p2 <- dim(X)[3]
-  
-  # Step 1: Stima della covarianza tra variabili
-  M2.h <- matrix(0, p2, p2)
-  for (t in 1:n) {
-    x_t <- matrix(X[t, 1, ], nrow = p2)
-    M2.h <- M2.h + x_t %*% t(x_t)
-  }
-  M2.h <- M2.h / n
-  
-  Q2.h <- eigen(M2.h, symmetric = TRUE)$vectors[, 1:k[2], drop = FALSE]
-  C.h <- sqrt(p2) * Q2.h
-  
-  # Fattori
-  F.h <- array(0, dim = c(n, 1, k[2]))
-  S.h <- array(0, dim = c(n, 1, p2))
-  for (t in 1:n) {
-    x_t <- matrix(X[t, 1, ], nrow = 1)  # 1 × p2
-    f_t <- x_t %*% C.h / p2
-    F.h[t, 1, ] <- f_t
-    S.h[t, 1, ] <- f_t %*% t(C.h)
-  }
-  
-  return(list(
-    row.load = matrix(1, nrow = 1, ncol = 1),  # costante nel DFM vettoriale
-    col.load = C.h,
-    factor = F.h,
-    fitted = S.h
-  ))
-}
 
 # ==============================================================================
 # MAR PARAMETERS
@@ -1104,112 +546,6 @@ mvar.llk <- function(., f){
 # ==============================================================================
 # INITIALIZE INPUTS
 # ==============================================================================
-
-# ---------------------------- Dolp Method -------------------------------------
-
-initialize_dmfm_em_inputs <- function(Y, k) {
-  # Dimensioni
-  T <- dim(Y)[1]
-  p1 <- dim(Y)[2]
-  p2 <- dim(Y)[3]
-  
-  # Step 0: Costruisci matrice W (1 = osservato, 0 = missing)
-  W <- array(1, dim = dim(Y))
-  W[is.na(Y)] <- 0
-  
-  # Step 1: Imputazione iniziale (Chen et al.)
-  imputazione <- mfm.cl(Y, W, k)
-  Y_imp <- imputazione$Y_imputed
-  
-  # Step 2: Projected Estimator (Yu et al.)
-  pe <- mfm.pe(Y_imp, k)
-  R0 <- pe$row.load
-  C0 <- pe$col.load
-  F0 <- pe$factor
-  
-  # Step 3: Calcolo E_t^(0)
-  E0 <- array(0, dim = c(T, p1, p2))
-  for (t in 1:T) {
-    E0[t,,] <- Y_imp[t,,] - R0 %*% F0[t,,] %*% t(C0)
-  }
-  
-  # Step 4: Calcolo K^(0)
-  K0 <- matrix(0, p2, p2)
-  for (t in 1:T) {
-    K0 <- K0 + t(E0[t,,]) %*% E0[t,,]
-  }
-  K0 <- diag(diag(K0)) / (T * p1)  # Solo diagonale
-  
-  # Step 5: Calcolo H^(0)
-  K0inv <- diag(1 / diag(K0))  # inverso della diagonale di K0
-  H0 <- matrix(0, p1, p1)
-  for (t in 1:T) {
-    H0 <- H0 + E0[t,,] %*% K0inv %*% t(E0[t,,])
-  }
-  H0 <- diag(diag(H0)) / (T * p1)  # Solo diagonale
-  
-  # Step 6: Costruzione ftilde
-  ftilde <- t(sapply(1:T, function(t) {
-    yt <- as.vector(Y_imp[t,,])
-    (1 / (p1 * p2)) * t(kronecker(C0, R0)) %*% yt
-  }))
-  
-  # Step 7: Calcolo BA^(0)
-  BA_num <- matrix(0, prod(k), prod(k))
-  BA_den <- matrix(0, prod(k), prod(k))
-  for (t in 2:T) {
-    BA_num <- BA_num + tcrossprod(ftilde[t,], ftilde[t-1,])
-    BA_den <- BA_den + tcrossprod(ftilde[t-1,], ftilde[t-1,])
-  }
-  BA0 <- BA_num %*% solve(BA_den)
-  
-  # Step 8: Calcolo QP^(0)
-  QP0 <- matrix(0, prod(k), prod(k))
-  for (t in 2:T) {
-    diff <- ftilde[t,] - BA0 %*% ftilde[t-1,]
-    QP0 <- QP0 + tcrossprod(diff)
-  }
-  QP0 <- QP0 / (T-1)
-  
-  # Step 9: Inizializzazione Ps0, Cs0, Pf0, ff0
-  Ps0 <- array(0, c(T, prod(k), prod(k)))
-  Cs0 <- array(0, c(T, prod(k), prod(k)))
-  Pf0 <- array(0, c(T, prod(k), prod(k)))
-  ff0 <- array(0, c(T, k[1], k[2]))
-  for (t in 1:T) {
-    Ps0[t,,] <- diag(prod(k))  # Identity matrix
-    Cs0[t,,] <- matrix(0, prod(k), prod(k))  # Zero matrix
-    Pf0[t,,] <- diag(prod(k))  # Identity for prediction error
-    ff0[t,,] <- matrix(0, k[1], k[2])  # Factors prediction mean at 0
-  }
-  
-  # Output lista finale
-  init <- list(
-    R  = R0,
-    C  = C0,
-    H  = H0,
-    K  = K0,
-    BA = BA0,
-    QP = QP0,
-    fs = F0,   # T x k1 x k2
-    ff = ff0,  # T x k1 x k2 (predictions)
-    Ps = Ps0,  # T x prod(k) x prod(k) smoothing error
-    Pf = Pf0,  # T x prod(k) x prod(k) prediction error
-    Cs = Cs0   # T x prod(k) x prod(k) cross covariances
-  )
-  
-  return(list(
-    init = init,
-    W = W,
-    Y = Y,
-    k = k
-  ))
-}
-
-
-# ---------------------------- Trapin Method -----------------------------------
-
-
 # dmfm.na.sv----
 dmfm.na.sv <- function(Y, X, k, W, t){
 
@@ -1420,6 +756,251 @@ dmfm.na.2.sv <- function(X, k, W, t){
   
 }
 
+
+# X <- Y_std
+# k <- k_hat
+# t = "dmfm"
+
+dmfm.na.2.sv.idio <- function(X, k, W, t,
+                              kappa   = 1e-4,
+                              max_als = 50,
+                              tol_als = 1e-6,
+                              clip_phi = 0.98,
+                              eps     = 1e-8,
+                              n_scale = 5){
+  
+  stopifnot(length(dim(X)) == 3)
+  
+  n <- dim(X)[1]
+  p <- dim(X)[-1]    # p = c(p1,p2)
+  p1 <- p[1]; p2 <- p[2]
+  pp <- p1 * p2
+  rr <- prod(k)
+  
+  # ------------------------------------------------------------
+  # 1) Remove NA's (complete slices) for PC-based initialization
+  # ------------------------------------------------------------
+  complete_time <- which(apply(X, 1, function(slice) !anyNA(slice)))
+  if (length(complete_time) < 3) {
+    stop("Too few complete slices to initialize (need at least 3).")
+  }
+  Y  <- X[complete_time, , , drop = FALSE]
+  nC <- dim(Y)[1]
+  
+  # ------------------------------------------------------------
+  # 2) Starting values R,C and factors from MFM on complete slices
+  # ------------------------------------------------------------
+  . <- list()
+  par  <- mfm.pe(Y, k)
+  R.pc <- par$row.load
+  C.pc <- par$col.load
+  Y.pc <- par$fitted
+  F.pc <- par$factor
+  
+  if (t == "fv"){
+    .$CR <- as.matrix(C.pc) %x% as.matrix(R.pc)     # (pp) x (rr)
+  } else {
+    .$R  <- as.matrix(R.pc)
+    .$C  <- as.matrix(C.pc)
+  }
+  
+  # ------------------------------------------------------------
+  # 3) Measurement nugget: Xi_t ~ N(0, kappa I_{pp})
+  #    (ONLY in measurement covariance, not in the state)
+  # ------------------------------------------------------------
+  .$kappa  <- kappa
+  .$h_meas <- diag(kappa, pp)
+  
+  # ------------------------------------------------------------
+  # 4) Starting values for persistent idiosyncratic block
+  #    Proxy: E_hat ≈ \tilde E on complete times (kappa small)
+  # ------------------------------------------------------------
+  E.hat <- Y - Y.pc
+  .$Ehat <- E.hat
+  
+  # Entrywise sufficient statistics (proxy)
+  S10 <- matrix(0, p1, p2)
+  S00 <- matrix(0, p1, p2)
+  for (tt in 2:nC){
+    Et   <- E.hat[tt,,]
+    Etm1 <- E.hat[tt-1,,]
+    S10 <- S10 + (Et * Etm1)
+    S00 <- S00 + (Etm1 * Etm1)
+  }
+  S00 <- pmax(S00, eps)
+  
+  # ALS init
+  a  <- rep(0, p1)
+  b  <- rep(1, p2)
+  hE <- rep(1, p1)
+  kE <- rep(1, p2)
+  
+  # ------------------------------------------------------------
+  # 5) ALS for (a,b): phi_ij = a_i b_j
+  # ------------------------------------------------------------
+  for (iter in 1:max_als){
+    a_old <- a; b_old <- b
+    
+    for (i in 1:p1){
+      num <- sum((b / pmax(kE, eps)) * S10[i,])
+      den <- sum(((b^2) / pmax(kE, eps)) * S00[i,])
+      a[i] <- num / pmax(den, eps)
+    }
+    for (j in 1:p2){
+      num <- sum((a / pmax(hE, eps)) * S10[,j])
+      den <- sum(((a^2) / pmax(hE, eps)) * S00[,j])
+      b[j] <- num / pmax(den, eps)
+    }
+    
+    # Stability clamp: max_ij |a_i b_j| <= clip_phi
+    phi_max <- max(abs(outer(a, b, "*")))
+    if (is.finite(phi_max) && phi_max > clip_phi && phi_max > 0){
+      s <- clip_phi / phi_max
+      a <- a * sqrt(s)
+      b <- b * sqrt(s)
+    }
+    
+    if (max(abs(a-a_old), abs(b-b_old)) < tol_als) break
+  }
+  
+  # ------------------------------------------------------------
+  # 6) Innovation variances (hE,kE) from RSS, alternating scaling
+  # ------------------------------------------------------------
+  phi <- outer(a, b, "*")
+  .$phi <- phi
+  
+  RSS <- matrix(0, p1, p2)
+  for (tt in 2:nC){
+    Et   <- E.hat[tt,,]
+    Etm1 <- E.hat[tt-1,,]
+    res  <- Et - (phi * Etm1)
+    RSS  <- RSS + (res * res)
+  }
+  RSS <- pmax(RSS, eps)
+  
+  for (iter in 1:n_scale){
+    for (i in 1:p1){
+      hE[i] <- (1 / ((nC-1) * p2)) * sum(RSS[i,] / pmax(kE, eps))
+    }
+    hE <- pmax(hE, eps)
+    for (j in 1:p2){
+      kE[j] <- (1 / ((nC-1) * p1)) * sum(RSS[,j] / pmax(hE, eps))
+    }
+    kE <- pmax(kE, eps)
+  }
+  
+  # Normalize mean(hE)=1 (scale identification)
+  mh <- mean(hE)
+  if (is.finite(mh) && mh > 0){
+    hE <- hE / mh
+    kE <- kE * mh
+  }
+  
+  .$A_E <- diag(a,  p1, p1)
+  .$B_E <- diag(b,  p2, p2)
+  .$H_E <- diag(hE, p1, p1)
+  .$K_E <- diag(kE, p2, p2)
+  
+  # ------------------------------------------------------------
+  # 7) Starting values for factor dynamics (A,B,P,Q) from F.pc
+  # ------------------------------------------------------------
+  est <- mar.fit(F.pc)
+  if (t == "fm"){
+    .$A <- est$A; .$B <- est$B; .$P <- est$P; .$Q <- est$Q
+  } else {
+    .$BA <- est$BA; .$QP <- est$QP
+  }
+  
+  # ============================================================
+  # 8) Kalman on AUGMENTED state: s_t = [ f_t ; e_t ]
+  #    x_t = [Lf I] s_t + Xi_t,   Xi_t ~ N(0, kappa I)
+  # ============================================================
+  m_state <- rr + pp
+  
+  # Missing selector
+  O <- lapply(split(W, seq(nrow(W))), function(x){ which(vec(x) == 1) })
+  
+  # Factor block
+  if (t == "fm") {
+    Tf <- .$B %x% .$A
+    Lf <- .$C %x% .$R
+    Qf <- .$Q %x% .$P
+  } else if (t == "fv") {
+    Tf <- .$BA
+    Lf <- .$CR
+    Qf <- .$QP
+  } else {
+    Tf <- .$BA
+    Lf <- .$C %x% .$R
+    Qf <- .$QP
+  }
+  
+  # Persistent idiosyncratic block
+  Te <- .$B_E %x% .$A_E
+  Qe <- (diag(diag(.$K_E)) %x% diag(diag(.$H_E)))  # dg(K_E) ⊗ dg(H_E)
+  
+  # Augmented transition and innovations
+  Ts <- rbind(
+    cbind(Tf, matrix(0, rr, pp)),
+    cbind(matrix(0, pp, rr), Te)
+  )
+  
+  Qs <- rbind(
+    cbind(Qf, matrix(0, rr, pp)),
+    cbind(matrix(0, pp, rr), Qe)
+  )
+  
+  # Augmented measurement matrix
+  Ls <- cbind(Lf, diag(pp))
+  
+  # Measurement covariance (nugget only)
+  Hx <- .$h_meas
+  
+  kout <- kalman.na(
+    list(t = Ts, l = Ls, q = Qs, h = Hx),
+    apply(X, 1, vec),
+    m_state,
+    list(f = rep(0, m_state),
+         P = diag(m_state)),
+    O
+  )
+  
+  # ============================================================
+  # 9) Save outputs: factors + persistent idiosyncratic state
+  # ============================================================
+  .$ff <- .$fs <- array(0, c(n, k[1], k[2]))
+  .$Pf <- .$Ps <- .$Cs <- array(0, c(n, m_state, m_state))
+  
+  .$Y      <- array(0, c(n, p1, p2))   # common component
+  .$Etilde <- array(0, c(n, p1, p2))   # persistent idiosyncratic state
+  
+  for (i in 1:n){
+    
+    s_ff <- kout$ff[, i]
+    s_fs <- kout$fs[, i]
+    
+    f_ff <- s_ff[1:rr]
+    f_fs <- s_fs[1:rr]
+    e_fs <- s_fs[(rr+1):(rr+pp)]
+    
+    .$ff[i,,] <- matrix(f_ff, k[1], k[2])
+    .$fs[i,,] <- matrix(f_fs, k[1], k[2])
+    
+    .$Pf[i,,] <- kout$Pf[,,i]
+    .$Ps[i,,] <- kout$Ps[,,i]
+    .$Cs[i,,] <- kout$Cs[,,i]
+    
+    .$Etilde[i,,] <- matrix(e_fs, p1, p2)
+    
+    if (t == "fv"){
+      .$Y[i,,] <- matrix(Lf %*% f_fs, p1, p2)
+    } else {
+      .$Y[i,,] <- .$R %*% .$fs[i,,] %*% t(.$C)
+    }
+  }
+  
+  return(.)
+}
 # ----
 
 dmfm.na.2.sv.vec <- function(X, k, W, t = "dmfm") {

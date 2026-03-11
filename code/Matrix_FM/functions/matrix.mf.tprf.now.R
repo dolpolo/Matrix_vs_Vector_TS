@@ -64,180 +64,201 @@ compute_m_tr <- function(date_t, dates_q) {
   if (date_t == M3) return(3)
   return(NA_integer_)
 }
-
-
 # ==============================================================================
-# EXPANDING NOWCAST
+# PSEUDO REAL-TIME (EXPANDING) — Matrix MF-TPRF
+#   Coherent with full-sample pipeline:
+#     standardize_mat_with_na -> init_CL_Yu -> aggregate_tensor_to_quarterly
+#     -> Lproxy (Kraemer) -> (p_AR, L_midas) grid BIC -> Tensor_MF_TPRF
+#   Two regimes:
+#     Hyper #1: up to start_eval-1
+#     Hyper #2: once at first date >= covid_end
 # ==============================================================================
-
-# X_tens_full <- X
-# Y_q_all <- y_q_all
-# proxy_name = "EA"
-# dates_m <- tensor$dates
-# dates_q <- dates_EA
-# tensor_info <- tensor_info_pred
-# tt <- 304 # [M1]
-# tt <- 305 # [M2]
-# tt <- 306 # [M3]
-
 
 pseudo_realtime_Tensor_MF_TPRF <- function(
-    X_tens_full,
-    Y_q_all,
-    proxy_name,
+    X_full,            # monthly predictors tensor: [T_m x P x K] (GDP excluded)
+    Y_q_all_full,      # quarterly targets matrix: [T_q_full x (1+P_eval)] (EA + countries)
+    proxy_name = "EA",
     params,
-    dates_m,
-    dates_q,
-    Unb,
-    agg_m,
-    agg_q,
-    tensor_info
+    dates_m, dates_q,  # monthly & quarterly date vectors
+    W_full,            # missingness mask for predictors (same dim as X_full): 1 obs, 0 miss
+    agg,               # aggregation rule for predictors (same shape used by aggregate_tensor_to_quarterly)
+    N_m, N_q,           # number of monthly & quarterly predictors (GDP excluded)
+    # controls
+    do_recalib = TRUE,
+    ils_maxit = 100, ils_tol = 1e-8,
+    verbose = TRUE
 ) {
   
-  # -------------------------------------------------------------------
-  # 0) META: dimensioni e controlli
-  # -------------------------------------------------------------------
-  stopifnot(length(dim(X_tens_full)) == 3)
-  T_m <- dim(X_tens_full)[1]
-  P   <- dim(X_tens_full)[2]
-  K   <- dim(X_tens_full)[3]
+  # -----------------------------
+  # 0) checks + eval window
+  # -----------------------------
+  stopifnot(length(dim(X_full)) == 3)
+  T_m <- dim(X_full)[1]
+  P   <- dim(X_full)[2]
+  K   <- dim(X_full)[3]
+  if (K != (N_m + N_q)) stop("K must equal N_m + N_q (GDP excluded).")
+  if (!all(dim(W_full) == dim(X_full))) stop("W_full must have same dim as X_full.")
+  if (!(proxy_name %in% colnames(Y_q_all_full))) stop("proxy_name not in Y_q_all_full colnames.")
   
-  N_m <- tensor_info$n_M
-  N_q <- tensor_info$n_Q
-  
-  if ((N_m + N_q) != K) stop("N_m + N_q != dim(X_tens_full)[3]. GDP deve essere escluso.")
-  if (!all(dim(Unb) == c(P, K))) stop("Unb deve essere [P x (N_m+N_q)].")
-  if (!all(dim(agg_m) == c(P, N_m))) stop("agg_m deve essere [P x N_m].")
-  if (!all(dim(agg_q) == c(P, N_q))) stop("agg_q deve essere [P x N_q].")
-  
-  if (nrow(Y_q_all) != length(dates_q)) stop("Y_q_all e dates_q non allineati.")
-  if (is.null(colnames(Y_q_all))) stop("Y_q_all deve avere colnames.")
-  if (!(proxy_name %in% colnames(Y_q_all))) stop("proxy_name non in colnames(Y_q_all).")
-  
-  countries_eval <- setdiff(colnames(Y_q_all), proxy_name)
-  if (length(countries_eval) < 1) stop("Nessun paese oltre alla proxy in Y_q_all.")
-  
-  # attributi (se ti servono)
-  attr(X_tens_full, "N_m")       <- N_m
-  attr(X_tens_full, "N_q")       <- N_q
-  attr(X_tens_full, "countries") <- tensor_info$countries
-  attr(X_tens_full, "var_names") <- tensor_info$vars
-  
-  agg_m_global <- as.vector(t(agg_m))
-  agg_q_global <- as.vector(t(agg_q))
-  
-  # -------------------------------------------------------------------
-  # 1) Evaluation window
-  # -------------------------------------------------------------------
   t_start <- which(dates_m == params$start_eval)
   t_end   <- which(dates_m == params$end_eval)
-  if (length(t_start) == 0 || length(t_end) == 0) stop("start_eval/end_eval non in dates_m.")
+  if (length(t_start) == 0 || length(t_end) == 0) stop("start_eval/end_eval not found in dates_m.")
   if (t_start > t_end) stop("start_eval > end_eval.")
   
-  # -------------------------------------------------------------------
-  # 2) Estimation window end (per hyper)
-  # -------------------------------------------------------------------
   t_est_end <- max(which(dates_m < params$start_eval))
-  if (!is.finite(t_est_end) || t_est_end < 24) stop("Estimation sample troppo corto.")
+  if (!is.finite(t_est_end) || t_est_end < 24) stop("Estimation sample too short (pre-eval).")
   
-  cat("\n>>> HYPER-PARAM SELECTION using data up to", as.character(dates_m[t_est_end]), "\n")
+  # first date >= covid_end (for recalibration)
+  t_recalib <- which(dates_m >= params$covid_end)[1]
+  do_recal <- isTRUE(do_recalib) && !is.na(t_recalib) && (t_recalib <= t_end)
   
-  # ==========================================================
-  # 2.A) COSTRUISCI DATASET ESTIMATION a t_est_end
-  # ==========================================================
-  X_cut_est <- unbalancedness_tensor(X_full = X_tens_full, Unb = Unb, current_t = t_est_end)
-  if (all(is.na(X_cut_est))) stop("Estimation cut all-NA.")
-  W_cut_est <- ifelse(is.na(X_cut_est), 0L, 1L)
+  countries_eval <- setdiff(colnames(Y_q_all_full), proxy_name)
+  if (length(countries_eval) < 1) stop("No countries beyond proxy in Y_q_all_full.")
   
-  std_est   <- standardize_mat_with_na(X_cut_est)
-  X_std_est <- std_est$X_scaled
+  # helper to print
+  say <- function(...) if (isTRUE(verbose)) cat(...)
   
-  flat_est <- flatten_tensor_to_matrix(
-    X_tens = X_std_est,
-    W_tens = W_cut_est,
-    N_m    = N_m,
-    N_q    = N_q,
-    agg_q  = agg_q
+  # --------------------------------------------------
+  # CORE BUILDER: given current_t (month index), build
+  #   X_cl (monthly imputed), X_cl_q (quarterly agg), r_hat, and proxy y_EA_q_cut
+  # --------------------------------------------------
+  build_data_up_to_t <- function(current_t) {
+    
+    # cut predictors to current_t (expanding)
+    X_cut <- X_full[1:current_t, , , drop = FALSE]
+    W_cut <- W_full[1:current_t, , , drop = FALSE]
+    
+    # standardize with NA (uses mask)
+    out_std <- standardize_mat_with_na(X_cut)
+    X_std   <- out_std$X_scaled
+    
+    # Cen&Lam + Yu init (imputation + r selection)
+    imp_cl <- init_CL_Yu(X_std, W_cut, params$Kmax)
+    X_cl   <- imp_cl$Y_init
+    r_hat  <- imp_cl$r
+    
+    # aggregate to quarterly
+    X_cl_q <- aggregate_tensor_to_quarterly(
+      X_tens = X_cl,
+      agg    = agg,
+      N_m    = N_m,
+      N_q    = N_q
+    )
+    
+    # quarters published up to date_t: use dates_q < dates_m[current_t]
+    date_t <- dates_m[current_t]
+    idx_pub <- which(dates_q < date_t)
+    if (length(idx_pub) < 2) return(NULL)
+    
+    T_q_use <- min(max(idx_pub), dim(X_cl_q)[1], nrow(Y_q_all_full))
+    if (T_q_use < 2) return(NULL)
+    
+    # cut targets and predictors to published quarters
+    Y_cut <- Y_q_all_full[1:T_q_use, , drop = FALSE]
+    X_lf  <- X_cl_q[1:T_q_use, , , drop = FALSE]
+    X_hf  <- X_cl       # monthly up to current_t already
+    
+    list(
+      out_std = out_std,
+      imp_cl  = imp_cl,
+      r_hat   = r_hat,
+      T_q_use = T_q_use,
+      X_lf    = X_lf,
+      X_hf    = X_hf,
+      Y_cut   = Y_cut
+    )
+  }
+  
+  # ==================================================
+  # 1) HYPER #1 selection (pre-eval): up to start_eval-1
+  # ==================================================
+  say("\n>>> HYPER #1 selection using data up to ", as.character(dates_m[t_est_end]), "\n")
+  est1 <- build_data_up_to_t(t_est_end)
+  if (is.null(est1)) stop("Hyper #1: not enough quarterly GDP published.")
+  
+  # Lproxy via Kraemer on vectorized X_lf (quarterly)
+  X_lf_vec1 <- tensor_to_vector(X_tens = est1$X_lf, N_m = N_m, N_q = N_q)
+  y_proxy1  <- as.numeric(est1$Y_cut[, proxy_name])
+  
+  pls1   <- select_L_autoproxy_3prf(X_lf_vec1, y_proxy1, Zmax = params$Zmax)
+  Lproxy_1 <- pls1$L_opt
+  
+  # (p_AR, L_midas) via BIC grid (matrix)
+  lag1 <- choose_UMIDAS_grid_tensor_MF(
+    X_lf = est1$X_lf,
+    X_hf = est1$X_hf,
+    y_q  = y_proxy1,
+    r    = est1$r_hat,
+    Lproxy   = Lproxy_1,
+    Lmax     = params$Lmax,
+    p_AR_max = params$p_AR_max,
+    use_autoproxy = TRUE,
+    y_proxy = y_proxy1,
+    standardize_proxy = TRUE,
+    orthonormalize_each_iter = TRUE,
+    orthonormalize_final_Z   = TRUE,
+    ils_maxit = ils_maxit,
+    ils_tol   = ils_tol
   )
-  X_obs_est <- flat_est$X_mat
   
-  A_est <- A_list(
-    X_na  = X_obs_est,
-    N_q   = flat_est$N_q_global,
-    agg_q = flat_est$agg_q_global
-  )
+  L_midas_1 <- lag1$best_BIC$L
+  p_ar_1    <- lag1$best_BIC$p_AR
+  r_1       <- est1$r_hat
   
-  init_est <- init_CL_ER(X_std = X_std_est, W = W_cut_est, kmax = params$kmax, do_plot = FALSE)
+  say("# Hyper #1: Lproxy=", Lproxy_1,
+      " | L_midas=", L_midas_1,
+      " | p_AR=", p_ar_1,
+      " | r=(", r_1[1], ",", r_1[2], ")\n")
   
-  # >>> r scelto nell'estimation e fissato
-  r_fix <- init_est$r                  # c(r1,r2)
-  r_vec_fix <- prod(r_fix)
+  # ==================================================
+  # 2) HYPER #2 selection (post-covid) once at first date >= covid_end
+  # ==================================================
+  Lproxy_2 <- Lproxy_1; L_midas_2 <- L_midas_1; p_ar_2 <- p_ar_1; r_2 <- r_1
   
-  X_init_est <- flatten_tensor_init(X_tens = init_est$X_init, N_m = N_m, N_q = N_q)
+  if (do_recal) {
+    say("\n>>> HYPER #2 selection using data up to ", as.character(dates_m[t_recalib]), "\n")
+    est2 <- build_data_up_to_t(t_recalib)
+    
+    if (!is.null(est2)) {
+      X_lf_vec2 <- tensor_to_vector(X_tens = est2$X_lf, N_m = N_m, N_q = N_q)
+      y_proxy2  <- as.numeric(est2$Y_cut[, proxy_name])
+      
+      pls2 <- select_L_autoproxy_3prf(X_lf_vec2, y_proxy2, Zmax = params$Zmax)
+      Lproxy_2 <- pls2$L_opt
+      
+      lag2 <- choose_UMIDAS_grid_tensor_MF(
+        X_lf = est2$X_lf,
+        X_hf = est2$X_hf,
+        y_q  = y_proxy2,
+        r    = est2$r_hat,
+        Lproxy   = Lproxy_2,
+        Lmax     = params$Lmax,
+        p_AR_max = params$p_AR_max,
+        use_autoproxy = TRUE,
+        y_proxy = y_proxy2,
+        standardize_proxy = TRUE,
+        orthonormalize_each_iter = TRUE,
+        orthonormalize_final_Z   = TRUE,
+        ils_maxit = ils_maxit,
+        ils_tol   = ils_tol
+      )
+      
+      L_midas_2 <- lag2$best_BIC$L
+      p_ar_2    <- lag2$best_BIC$p_AR
+      r_2       <- est2$r_hat
+      
+      say("# Hyper #2: Lproxy=", Lproxy_2,
+          " | L_midas=", L_midas_2,
+          " | p_AR=", p_ar_2,
+          " | r=(", r_2[1], ",", r_2[2], ")\n")
+    } else {
+      say("(!) Hyper #2 skipped: not enough GDP published at recalib date.\n")
+    }
+  }
   
-  EM_est <- EM_algorithm(
-    X_init   = X_init_est,
-    X_obs    = X_obs_est,
-    A_list   = A_est,
-    r        = r_vec_fix,
-    max_iter = 100,
-    tol      = 1e-4
-  )
-  X_em_est <- EM_est$X_completed
-  for (nm in c("N_m","N_q","countries","var_names")) attr(X_em_est, nm) <- attr(X_obs_est, nm)
-  
-  # aggrego (LF)
-  X_m_est <- X_em_est[, 1:flat_est$N_m_global, drop = FALSE]
-  X_q_est <- X_em_est[, (flat_est$N_m_global + 1):flat_est$N_global, drop = FALSE]
-  
-  X_mq_est <- agg_mq(X_m_est, agg_m_global)
-  X_qq_est <- agg_qq(X_q_est, agg_q_global)
-  X_em_agg_est <- cbind(X_mq_est, X_qq_est)
-  for (nm in c("N_m","N_q","countries","var_names")) attr(X_em_agg_est, nm) <- attr(X_em_est, nm)
-  
-  # unflatten
-  X_em_est_tens     <- unflatten_matrix_to_tensor(X_em_est)       # [T_m_est x P x K]
-  X_em_agg_est_tens <- unflatten_matrix_to_tensor(X_em_agg_est)   # [T_q_est x P x K]
-  T_q_est <- dim(X_em_agg_est_tens)[1]
-  T_m_est <- dim(X_em_est_tens)[1]
-  
-  # trimestri proxy disponibili fino a t_est_end
-  idx_pub_est <- which(dates_q < dates_m[t_est_end])
-  if (length(idx_pub_est) < 2) stop("Troppi pochi trimestri proxy nell'estimation sample.")
-  T_q_use_est <- min(max(idx_pub_est), T_q_est, nrow(Y_q_all))
-  
-  y_proxy_est <- as.numeric(Y_q_all[1:T_q_use_est, proxy_name])
-  
-  X_lf_est <- X_em_agg_est_tens[1:T_q_use_est, , , drop = FALSE]
-  X_hf_est <- X_em_est_tens[1:T_m_est,       , , drop = FALSE]
-  
-  # >>> NIENTE center_Y: X è già centrato/standardizzato in std_est
-  
-  # ==========================================================
-  # 2.B) SELEZIONE hyper su estimation
-  # ==========================================================
-  X_lf_est_mat <- matrix(NA_real_, nrow = dim(X_lf_est)[1], ncol = dim(X_lf_est)[2] * dim(X_lf_est)[3])
-  for (t in seq_len(nrow(X_lf_est_mat))) X_lf_est_mat[t, ] <- as.vector(X_lf_est[t, , ])
-  
-  pls_obj    <- select_L_autoproxy_3prf(X_lf = X_lf_est_mat, y_q = y_proxy_est, Zmax = params$Zmax)
-  Lproxy_fix <- pls_obj$L_opt
-  cat("# [Hyper] Lproxy_fix:", Lproxy_fix, "\n")
-  
-  lag_sel <- choose_UMIDAS_lag_tensor_MF(
-    X_lf   = X_lf_est,
-    X_hf   = X_hf_est,
-    y_q    = y_proxy_est,
-    r      = r_fix,
-    Lmax   = params$Lmax,
-    Lproxy = Lproxy_fix,
-    p_AR   = params$p_AR
-  )
-  L_midas_fix <- lag_sel$lag_BIC
-  cat("# [Hyper] L_midas_fix (BIC):", L_midas_fix, "\n")
-  
-  # -------------------------------------------------------------------
-  # 3) Evaluation rolling con hyper FISSI
-  # -------------------------------------------------------------------
+  # ==================================================
+  # 3) REAL-TIME LOOP (expanding) with fixed hypers by regime
+  # ==================================================
   now_M1 <- setNames(vector("list", length(countries_eval)), countries_eval)
   now_M2 <- setNames(vector("list", length(countries_eval)), countries_eval)
   now_M3 <- setNames(vector("list", length(countries_eval)), countries_eval)
@@ -245,68 +266,42 @@ pseudo_realtime_Tensor_MF_TPRF <- function(
   for (tt in seq(t_start, t_end)) {
     
     date_t <- dates_m[tt]
-    cat("\n>>> REAL-TIME at", as.character(date_t),
-        "| r_fix =", paste0("(", r_fix[1], ",", r_fix[2], ")"),
-        "| Lproxy_fix =", Lproxy_fix,
-        "| L_midas_fix =", L_midas_fix, "\n")
     
-    X_cut <- unbalancedness_tensor(X_full = X_tens_full, Unb = Unb, current_t = tt)
-    if (all(is.na(X_cut))) next
-    W_cut <- ifelse(is.na(X_cut), 0L, 1L)
+    use_post <- do_recal && (tt >= t_recalib)
+    Lproxy_use <- if (use_post) Lproxy_2 else Lproxy_1
+    L_midas_use <- if (use_post) L_midas_2 else L_midas_1
+    p_ar_use <- if (use_post) p_ar_2 else p_ar_1
+    r_use <- if (use_post) r_2 else r_1
     
-    std_out <- standardize_mat_with_na(X_cut)
-    X_std <- std_out$X_scaled
+    say("\n>>> REAL-TIME at ", as.character(date_t),
+        " | regime=", if (use_post) "post-COVID" else "pre-COVID",
+        " | Lproxy=", Lproxy_use,
+        " | L_midas=", L_midas_use,
+        " | p_AR=", p_ar_use,
+        " | r=(", r_use[1], ",", r_use[2], ")\n")
     
-    flat <- flatten_tensor_to_matrix(X_tens = X_std, W_tens = W_cut, N_m = N_m, N_q = N_q, agg_q = agg_q)
-    X_obs <- flat$X_mat
+    rt <- build_data_up_to_t(tt)
+    if (is.null(rt)) next
     
-    A <- A_list(X_na = X_obs, N_q = flat$N_q_global, agg_q = flat$agg_q_global)
-    
-    init <- init_CL_ER(X_std = X_std, W = W_cut, kmax = params$kmax, do_plot = FALSE)
-    X_init <- flatten_tensor_init(X_tens = init$X_init, N_m = N_m, N_q = N_q)
-    
-    EM_out <- EM_algorithm(X_init = X_init, X_obs = X_obs, A_list = A,
-                           r = r_vec_fix, max_iter = 100, tol = 1e-4)
-    
-    X_em <- EM_out$X_completed
-    T_m_cur <- nrow(X_em)
-    for (nm in c("N_m","N_q","countries","var_names")) attr(X_em, nm) <- attr(X_obs, nm)
-    
-    X_m_em <- X_em[, 1:flat$N_m_global, drop = FALSE]
-    X_q_em <- X_em[, (flat$N_m_global + 1):flat$N_global, drop = FALSE]
-    
-    X_mq <- agg_mq(X_m_em, agg_m_global)
-    X_qq <- agg_qq(X_q_em, agg_q_global)
-    X_em_agg <- cbind(X_mq, X_qq)
-    for (nm in c("N_m","N_q","countries","var_names")) attr(X_em_agg, nm) <- attr(X_em, nm)
-    
-    X_em_tens     <- unflatten_matrix_to_tensor(X_em)
-    X_em_agg_tens <- unflatten_matrix_to_tensor(X_em_agg)
-    T_q_em <- dim(X_em_agg_tens)[1]
-    
-    idx_pub <- which(dates_q < date_t)
-    if (length(idx_pub) < 2) next
-    T_q_use <- min(max(idx_pub), T_q_em, nrow(Y_q_all))
-    if (T_q_use < 2) next
-    
-    Y_cut <- Y_q_all[1:T_q_use, , drop = FALSE]
-    X_lf_cut <- X_em_agg_tens[1:T_q_use, , , drop = FALSE]
-    X_hf_cut <- X_em_tens[1:T_m_cur, , , drop = FALSE]
-    
-    # >>> NIENTE center_Y anche qui
-    
+    # run MF-TPRF (full-sample estimator on the cut dataset)
     out_rt <- Tensor_MF_TPRF(
-      X_lf       = X_lf_cut,
-      X_hf       = X_hf_cut,
-      Y_q_all    = Y_cut,
-      proxy_name = proxy_name,
-      Lproxy     = Lproxy_fix,
-      L_midas    = L_midas_fix,
-      p_AR       = params$p_AR,
-      r          = r_fix
+      X_lf        = rt$X_lf,
+      X_hf        = rt$X_hf,
+      Y_q_all     = rt$Y_cut,
+      proxy_name  = proxy_name,
+      Lproxy      = Lproxy_use,
+      L_midas     = L_midas_use,
+      p_AR        = p_ar_use,
+      r           = r_use,
+      standardize_proxy = TRUE,
+      orthonormalize_each_iter = TRUE,
+      orthonormalize_final_Z   = TRUE,
+      ils_maxit = ils_maxit,
+      ils_tol   = ils_tol
     )
     
-    m_tr <- compute_m_tr(date_t, dates_q)
+    # last nowcast month in this vintage
+    m_tr <- compute_m_tr(date_t, dates_q)  # must return 1/2/3
     if (is.na(m_tr)) next
     key <- as.character(date_t)
     
@@ -322,10 +317,10 @@ pseudo_realtime_Tensor_MF_TPRF <- function(
   }
   
   list(
-    r_fix       = r_fix,
-    Lproxy_fix  = Lproxy_fix,
-    L_midas_fix = L_midas_fix,
-    countries   = countries_eval,
+    hyper_pre  = list(Lproxy = Lproxy_1, L_midas = L_midas_1, p_AR = p_ar_1, r = r_1, t_est_end = dates_m[t_est_end]),
+    hyper_post = list(Lproxy = Lproxy_2, L_midas = L_midas_2, p_AR = p_ar_2, r = r_2,
+                      t_recalib = if (do_recal) dates_m[t_recalib] else NA),
+    countries = countries_eval,
     M1 = lapply(now_M1, function(x) unlist(x)),
     M2 = lapply(now_M2, function(x) unlist(x)),
     M3 = lapply(now_M3, function(x) unlist(x))

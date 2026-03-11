@@ -285,34 +285,32 @@ build_autoproxy_3prf <- function(X_lf, y_q, Lproxy) {
 
 
 # ==============================================================================
-# LAG U-MIDAS MF-3PRF: 
-#===============================================================================
-# Fixing p_AR as a parameter
-# considering the restriction after the Wald Test
+# LAG SELECTION U-MIDAS MF-3PRF (grid over p_AR and L, common effective sample)
+# ==============================================================================
 
 choose_UMIDAS_lag <- function(X_lf, X_hf, y_q,
-                              Lmax         = 5,
-                              Lproxy       = 1, 
-                              p_AR         = 1,      # ordine AR(y) scelto FUORI
+                              Lmax         = 5,      # max MIDAS lag length (L)
+                              Lproxy       = 1,      # number of proxies/factors
+                              p_AR_max     = 4,      # max AR order for y
                               Robust_F     = FALSE,
                               alpha        = 0.10,
                               robust_type  = c("White", "NW"),
-                              nw_lag       = 1){
+                              nw_lag       = 1) {
   
   robust_type <- match.arg(robust_type)
   
   # --------------------------------------------------------
   # Preliminari
   # --------------------------------------------------------
-  X_lf <- as.matrix(X_lf)   # trimestrali (T_q x N) - dopo EM + aggregazione
-  X_hf <- as.matrix(X_hf)   # mensili (T_m x N)
-  y_q  <- as.numeric(y_q)   # target trimestrale (T_q)
+  X_lf <- as.matrix(X_lf)   # trimestrali (T_q x N)
+  X_hf <- as.matrix(X_hf)   # mensili    (T_m x N)
+  y_q  <- as.numeric(y_q)   # target     (T_q)
   T_q  <- length(y_q)
   T_m  <- nrow(X_hf)
   
-  if (Lmax < 1) stop("Lmax deve essere >= 1")
+  if (Lmax < 0) stop("Lmax deve essere >= 0")
   if (Lmax >= T_q) stop("Lmax non può essere >= T_q")
-  if (p_AR < 0) stop("p_AR deve essere >= 0")
+  if (p_AR_max < 0) stop("p_AR_max deve essere >= 0")
   
   # --------------------------------------------------------
   # STEP 0 – Costruzione L-autoproxy (usa intercetta internamente)
@@ -321,7 +319,6 @@ choose_UMIDAS_lag <- function(X_lf, X_hf, y_q,
   
   # --------------------------------------------------------
   # STEP 1 – First Pass con intercetta
-  #
   #  x_{i,τ} = α0_i + Z_τ α_i + u_{i,τ}
   # --------------------------------------------------------
   Z_tilde <- cbind(1, Z)                          # T_q x (1+Lproxy)
@@ -336,7 +333,7 @@ choose_UMIDAS_lag <- function(X_lf, X_hf, y_q,
   # --------------------------------------------------------
   # STEP 1bis – First Pass con Robust F-test (opzionale)
   # --------------------------------------------------------
-  if (Robust_F == FALSE) {
+  if (!Robust_F) {
     Phi_hat <- Phi_hat_full
   } else {
     Phi_hat <- step1_select_Phi(X_lf        = X_lf,
@@ -347,13 +344,9 @@ choose_UMIDAS_lag <- function(X_lf, X_hf, y_q,
   }
   
   # --------------------------------------------------------
-  # STEP 2 – Second Pass con intercetta time-varying (phi_{0,t})
-  #
+  # STEP 2 – Second Pass (fattori mensili)
   # x_{i,t} = phi_{0,t} + Phi_hat[i,]' f_t + xi_{i,t}
-  # Matricialmente: X = F_tilde * Phi_tilde' + Xi
-  # con Phi_tilde = [1_N , Phi_hat]  (N x (Lproxy+1))
   # --------------------------------------------------------
-  
   Phi_tilde <- cbind(1, Phi_hat)                     # N x (1+Lproxy)
   
   XtX_2 <- t(Phi_tilde) %*% Phi_tilde                # (1+Lproxy) x (1+Lproxy)
@@ -362,8 +355,8 @@ choose_UMIDAS_lag <- function(X_lf, X_hf, y_q,
   M_2        <- solve(XtX_2, XtY_2)                  # (1+Lproxy) x T_m
   F_tildehat <- t(M_2)                               # T_m x (1+Lproxy)
   
-  phi0_hat <- F_tildehat[, 1, drop = FALSE]          # T_m x 1 (intercetta time-varying)
-  F_hat    <- F_tildehat[, -1, drop = FALSE]         # T_m x Lproxy (fattori)
+  # phi0_hat <- F_tildehat[, 1, drop = FALSE]        # (se serve)
+  F_hat    <- F_tildehat[, -1, drop = FALSE]         # T_m x Lproxy
   
   # --------------------------------------------------------
   # STEP 3.1 – Fattori trimestrali per trimestri COMPLETI
@@ -377,79 +370,122 @@ choose_UMIDAS_lag <- function(X_lf, X_hf, y_q,
   F3 <- F_hat[seq(3, 3 * T_q, by = 3), , drop = FALSE]  # mese 3
   
   # --------------------------------------------------------
-  # LOOP over L (lag MF-UMIDAS) con AR(p_AR) su y
+  # GRID SEARCH over (p_AR, L) with COMMON effective sample
   # --------------------------------------------------------
-  results <- data.frame(L = integer(),
-                        AIC = numeric(),
-                        BIC = numeric())
   
-  for (L in 1:Lmax) {
-    
-    # punto di partenza in termini di trimestre:
-    # serve avere disponibili sia i L lag dei fattori sia i p_AR lag di y
-    start_tau <- max(L, p_AR) + 1
-    T_eff     <- T_q - max(L, p_AR)   # numero osservazioni effettive
-    
-    # variabile dipendente: y_tau per tau = start_tau,...,T_q
-    y_dep <- y_q[start_tau:T_q]
-    
-    # ---- blocco AR in y: lag trimestrali di y ----
-    Y_lag <- NULL
-    if (p_AR > 0) {
-      for (j in 1:p_AR) {
-        Y_lag <- cbind(
-          Y_lag,
-          y_q[(start_tau - j):(T_q - j)]
-        )
-      }
-      colnames(Y_lag) <- paste0("y_lag", 1:p_AR)
-    }
-    
-    # ---- blocco fattori U-MIDAS: lag di F1,F2,F3 ----
-    Xreg_F <- NULL
-    if (L > 0) {
-      for (ell in 0:(L-1)) {
-        idx <- (start_tau - ell):(T_q - ell)   # lunghezza T_eff
-        
-        Xreg_F <- cbind(
-          Xreg_F,
-          F1[idx, , drop = FALSE],
-          F2[idx, , drop = FALSE],
-          F3[idx, , drop = FALSE]
-        )
-      }
-    }
-    
-    # Combino AR + fattori
-    if (p_AR > 0 && !is.null(Xreg_F)) {
-      Xreg <- cbind(Y_lag, Xreg_F)
-    } else if (p_AR > 0 && is.null(Xreg_F)) {   # solo AR
-      Xreg <- Y_lag
-    } else {
-      Xreg <- Xreg_F                            # solo fattori
-    }
-    
-    # Regressione U-MIDAS con intercetta
-    fit <- lm(y_dep ~ Xreg)
-    
-    results <- rbind(
-      results,
-      data.frame(
-        L   = L,
-        AIC = AIC(fit),
-        BIC = BIC(fit)
-      )
-    )
+  # Global common start:
+  # - AR needs p_AR lags => start >= p_AR + 1
+  # - MIDAS uses ell=0,...,L-1 => needs max lag (L-1) => start >= (L-1)+1 = L
+  # So start >= 1 + max(p_AR, L-1)
+  start_tau_global <- 1 + max(p_AR_max, Lmax - 1)
+  
+  if (start_tau_global > T_q) {
+    stop("Campione insufficiente: start_tau_global > T_q. Riduci Lmax o p_AR_max.")
   }
+  
+  n_eff <- T_q - start_tau_global + 1
+  
+  results <- data.frame(
+    p_AR = integer(),
+    L    = integer(),
+    n    = integer(),
+    k    = integer(),
+    sigma2 = numeric(),
+    AIC  = numeric(),
+    BIC  = numeric()
+  )
+  
+  # Helper per costruire regressori su [start_tau_global : T_q]
+  for (p_AR in 0:p_AR_max) {
+    for (L in 0:Lmax) {
+      
+      # variabile dipendente comune
+      y_dep <- y_q[start_tau_global:T_q]
+      
+      # ---- blocco AR: y_{t-1},...,y_{t-p_AR} allineati sullo stesso range ----
+      Y_lag <- NULL
+      if (p_AR > 0) {
+        for (j in 1:p_AR) {
+          Y_lag <- cbind(
+            Y_lag,
+            y_q[(start_tau_global - j):(T_q - j)]
+          )
+        }
+        colnames(Y_lag) <- paste0("y_lag", 1:p_AR)
+      }
+      
+      # ---- blocco fattori MIDAS: ell=0,...,L-1 (se L=0, blocco vuoto) ----
+      Xreg_F <- NULL
+      if (L > 0) {
+        for (ell in 0:(L - 1)) {
+          idx <- (start_tau_global - ell):(T_q - ell)  # lunghezza n_eff
+          Xreg_F <- cbind(
+            Xreg_F,
+            F1[idx, , drop = FALSE],
+            F2[idx, , drop = FALSE],
+            F3[idx, , drop = FALSE]
+          )
+        }
+      }
+      
+      # Combino i regressori (può essere anche solo AR o solo fattori o nulla)
+      if (!is.null(Y_lag) && !is.null(Xreg_F)) {
+        Xreg <- cbind(Y_lag, Xreg_F)
+      } else if (!is.null(Y_lag) && is.null(Xreg_F)) {
+        Xreg <- Y_lag
+      } else if (is.null(Y_lag) && !is.null(Xreg_F)) {
+        Xreg <- Xreg_F
+      } else {
+        Xreg <- NULL
+      }
+      
+      # Regressione con intercetta
+      if (is.null(Xreg)) {
+        fit <- lm(y_dep ~ 1)
+        # k = 1 (intercetta)
+        k <- 1L
+      } else {
+        fit <- lm(y_dep ~ Xreg)
+        # k = 1 + p_AR + 3*Lproxy*L
+        # (intercetta + AR lags + MIDAS factor blocks)
+        k <- 1L + p_AR + 3L * Lproxy * L
+      }
+      
+      # Residual variance (MLE-style: RSS/n)
+      resid <- residuals(fit)
+      sigma2_hat <- mean(resid^2)
+      
+      # IC coerenti col report (per osservazione)
+      AIC_val <- log(sigma2_hat) + (2 * k) / n_eff
+      BIC_val <- log(sigma2_hat) + (k * log(n_eff)) / n_eff
+      
+      results <- rbind(
+        results,
+        data.frame(
+          p_AR  = p_AR,
+          L     = L,
+          n     = n_eff,
+          k     = k,
+          sigma2 = sigma2_hat,
+          AIC   = AIC_val,
+          BIC   = BIC_val
+        )
+      )
+    }
+  }
+  
+  # Selezione
+  best_AIC <- results[which.min(results$AIC), ]
+  best_BIC <- results[which.min(results$BIC), ]
   
   return(list(
     results = results,
-    lag_AIC = results$L[which.min(results$AIC)],
-    lag_BIC = results$L[which.min(results$BIC)]
+    start_tau_global = start_tau_global,
+    n_eff = n_eff,
+    best_AIC = best_AIC,
+    best_BIC = best_BIC
   ))
 }
-
-
 
 
 # ==============================================================================

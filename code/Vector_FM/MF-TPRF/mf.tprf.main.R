@@ -1,37 +1,49 @@
 # ==============================================================================
-#             Three Pass Regression Filter and the EM Algorithm: 
+#                        Three Pass Regression Filter: 
 #         A Nowcasting Framework for Mixed Frequency Data in Euro Area
-#                               - Main Script - 
+#
 # ==============================================================================
-# This script estimates a Three Pass regression filter (TPRF) using EM-algorithm 
-# to impute missing and performs a pseudo real-time nowcasting exercise for GDP 
-# growth in the Euro Area's main economies:
+# This script estimates a Three Pass regression filter (TPRF) for Mixed Frequency
+# data and performs a pseudo real-time nowcasting exercise for GDP growth in the 
+# Euro Area's main economies:
 # Germany (DE), France (FR), Italy (IT), and Spain (ES). 
 # It includes:
 #   1. Data preparation and harmonization across countries
-#   2. Estimation of the number of latent factors and U-MIDAS lags
-#   4. Model initialization and parameter estimation using the EM algorithm 
-#   5. Pseudo real-time rolling nowcasting of GDP
-# The following TPRF sections is based on Hepenstick and Marcellino extension to 
-# Mixed Frequenct data
+#   2. NA's Imputation in predictors panel         --> Xiong & Pelger (2020)
+#   3. Estimation of the number of latent factors  --> Ahn (2013)
+#   4. Estimation of the number of Proxies         --> Kraemer & Sugiyama (2011)
+#   5, Estimation of U-MIDAS and AR lags number    --> IC
+#   6. Full sample estimation with MF-TPRF
+#   7. Pseudo real-time rolling nowcast of GDP
 #
 # ==============================================================================
-# Author      : Davide Delfino
-# Institution : Alma Mater Studiorum - University of Bologna
-# Dataset     : Barigozzi & Lissona (2024), EA-MD-QD
+# Author          : Davide Delfino
+# Institution     : Bocconi University
 #
-# Disclaimer  : ---
+# ===============================================================================
+# Main Reference  : Hepenstick & Marcellino (2018), MF-TPRF
+# Dataset         : Barigozzi & Lissona (2024), EA-MD-QD
 #
 # ==============================================================================
-# Notes       : Other EA countries such as BE, NL, AT, PT, IR, GR and different 
-#               set of Monthly and Quarterly variables can be added
+# Notes : Other EA countries such as BE, NL, AT, PT, IR, GR and different set of
+#         Monthly and Quarterly variables are available from the Dataset
+#
 # ==============================================================================
-# Script Type : Data Preparation / Estimation / Nowcasting / MF-TPRF
+# Script Type     : Main script
+# ==============================================================================
+
+# ==============================================================================
+# OUTPUT     
+# - Fit     : better when COVID is not masked 
+# - Nowcast : better when COVID is masked
 # ==============================================================================
 
 
+
+
+
 # ==============================================================================
-# 0. SET WORKING DIRECTORY & PATHS
+# SET WORKING DIRECTORY & PATHS
 # ==============================================================================
 
 path_main    <- "C:/Users/david/Desktop/Paper/Matrix_vs_Vector_TS/code"
@@ -43,10 +55,8 @@ path_func    <- file.path(path_main, "Vector_FM/functions")
 path_results <- file.path(path_main, "Vector_FM/MF-TPRF/results/outputs")
 path_graph   <- file.path(path_main, "Vector_FM/MF-TPRF/results/graph")
 
-
-
 # ==============================================================================
-# 1. LOAD REQUIRED LIBRARIES
+# LOAD REQUIRED LIBRARIES
 # ==============================================================================
 
 ## Data Handling
@@ -78,52 +88,59 @@ library(conflicted)
 conflict_prefer("select",  "dplyr", quiet = TRUE)
 conflict_prefer("filter",  "dplyr", quiet = TRUE)
 
-
-
 # ==============================================================================
-# 2. SOURCE USER-DEFINED FUNCTIONS
+# SOURCE USER-DEFINED FUNCTIONS
 # ==============================================================================
 
+# data preparation
+source(file.path(path_func, "mf.tprf.utils.R"))
 source(file.path(path_func, "mf.tprf.prep.R"))
-# source(file.path(path_func, "mf.tprf.R"))
-source(file.path(path_func, "mf.tprf.pls.R"))
-source(file.path(path_func, "mf.tprf.em.R"))
+
+# mf-tprf estimation
+source(file.path(path_func, "mf.tprf.R"))
+
+# imputation
+source(file.path(path_func, "mf.tprf.imp.R"))
+
+# factor selection
 source(file.path(path_func, "mf.tprf.fs.R"))
+
+# nowcasting
 source(file.path(path_func, "mf.tprf.now.R"))
 
 
 # ==============================================================================
-# 3.1 PARAMETERS & COUNTRY LIST & COUNTRY OF INTEREST SELECTION
+# PARAMETERS & COUNTRY LIST & COUNTRY OF INTEREST SELECTION
 # ==============================================================================
 
 # Users's parameters
 params <- list(
-  start_est    = as.Date("2000-04-01"),    # Accounting from missingenss in growth rates wrt 1999
+  start_est    = as.Date("2000-04-01"),   # growth rate 2001-01 NA
   start_eval   = as.Date("2017-01-01"),
   end_eval     = as.Date("2025-10-01"),
   covid_start  = as.Date("2020-03-01"),
   covid_end    = as.Date("2021-07-01"),
   covid_mask_m = TRUE,                    # Boolean: if empty == TRUE
-  covid_mask_q = FALSE,                    # Boolean: if empty == TRUE
-  target       = "GDP",                    # quarterly target variable
-  sel_method   = "none",                   # "none" | "corr_threshold" | "F-Test" | "LASSO"
-  alpha_lasso  = 1,                        # 1=LASSO, 0=Ridge, (0,1)=Elastic Net
+  covid_mask_q = TRUE,                    # Boolean: if empty == TRUE
+  target       = "GDP",                   # quarterly target variable
   
   # Variable selection parameters
-  n_m        = 38,
-  n_q        = 10,
-  thr_m      = 0.10,
-  thr_q      = 0.85,
-  thr_F_test = 0.01,
+  sel_method   = "none",                  # "none" | "corr_threshold" | "F-Test" | "LASSO"
+  n_m          = 20,
+  n_q          = 50,
+  thr_m        = 0.10,
+  thr_q        = 0.85,
+  thr_F_test   = 0.01,
+  alpha_lasso  = 1,                        # 1=LASSO, 0=Ridge, (0,1)=Elastic Net
   
   # Factor and proxy selection parameters
-  Kmax = 10,                            # max number of factors
-  Zmax = 10,                            # max number of proxy
+  Kmax = 10,                               # max number of factors
+  Zmax = 10,                               # max number of proxy
   
   # MF-TPRF parameters
-  p_AR        = 1,                         # order AR(p) in U-MIDAS regression of y
+  p_AR_max    = 4,                         # Max numbers of lags y in U-MIDAS
   Lmax        = 6,                         # Max numbers of lags in the Factors in U-MIDAS
-  Robust_F    = TRUE,                      # Robust F test in the first step
+  Robust_F    = FALSE,                      # Robust F test in the first step
   alpha       = 0.1,
   robust_type = "NW",                      # White--> HC | NW(Newey West)--> HAC
   nw_lag      = 1                          # Lag in the error autocorrelation in step 1
@@ -133,11 +150,10 @@ params <- list(
 countries <- c("DE", "FR", "IT", "ES")
 
 # Selected country
-country <- "ES"
-
+country <- "FR"
 
 # ==============================================================================
-# 4. PREPARE DATA FOR ALL COUNTRIES AND EXCTARCT THE ONE OF INTEREST
+# 1 PREPARE DATA FOR ALL COUNTRIES AND EXCTARCT THE ONE OF INTEREST
 # ==============================================================================
 all_countries <- prepare_all_countries(
   countries       = countries,
@@ -155,129 +171,121 @@ dates_q  <- all_countries$data[[country]]$DatesQ
 series   <- all_countries$data[[country]]$Series
 
 
+# ====================================
+# 1.2 TARGET AND PREDICTORS EXTRACTION
+# ====================================
 
-# ==============================================================================
-# 5. TARGET AND PREDICTORS IDENTIFICATION
-# ==============================================================================
+# target vector extraction (GDP for "cc")
+gdp_col     <- all_countries$data[[country]]$target_col
+target_name <- paste0(params$target, "_", country)  # es: "GDP_FR"
 
-gdp_col <- all_countries$data[[country]]$target_col
+# The quarterly growth in the first quarter is NA (NO EA before the 2000)
+y   <- as.matrix(data[, gdp_col, drop = FALSE])       # monthly target
+y_q <- as.matrix(y[!is.na(y)])                        # quarterly target
 
-y   <- as.matrix(data[, gdp_col, drop = FALSE])     # target
+# predictors panel extraction (X for "cc")
+X   <- as.matrix(data[, -gdp_col, drop = FALSE])      
 
-# The growth in the first quarter is 0 (NO EA before the 2000)
-y_q <- as.matrix(y[!is.na(y)])                      # quarterly target
+# =======================
+# 1.3 METADATA EXTRACTION
+# =======================
 
-X   <- as.matrix(data[, -gdp_col, drop = FALSE])    # predictors
+# Panel dimensions
+N_m     <- all_countries$data[[country]]$nM   # monthly indicators
 
+N_q_tot      <- all_countries$data[[country]]$nQ 
+q_series_all <- all_countries$data[[country]]$Series[(N_m + 1):(N_m + N_q_tot)]
+q_cols       <- which(toupper(q_series_all) != toupper(target_name))
+N_q          <- length(q_cols)                # quarterly indicators
 
-# ==============================================================================
-# 6. METADATA EXTRACTION
-# ==============================================================================
-
-## Dimensions
-N_m     <- all_countries$data[[country]]$nM
-nQ_tot  <- all_countries$data[[country]]$nQ
-
-# Quarterly series (all)
-Q_series_all <- all_countries$data[[country]]$Series[(N_m + 1):(N_m + nQ_tot)]
-
-# Remove target from quarterly list
-q_cols <- which(!grepl(params$target, Q_series_all, ignore.case = TRUE))
-N_q    <- length(q_cols)
-
-# Total number of predictors
-N <- N_m + N_q
+N       <- N_m + N_q                          # Tot number of indicators
 
 
+# Aggregation rule (stock & flows)
 agg_m   <- all_countries$data[[country]]$agg_m
 agg_q   <- all_countries$data[[country]]$agg_q[q_cols]
 agg     <- c(agg_m, agg_q)
 
-Type_m  <- all_countries$data[[country]]$TypeM
-Type_q  <- all_countries$data[[country]]$TypeQ[q_cols]
-Type    <- c(Type_m, Type_q)
-
+# Frequency (monthly or quarterly)
 Freq_m  <- all_countries$data[[country]]$freq_m
 Freq_q  <- all_countries$data[[country]]$freq_q[q_cols]
 Freq    <- c(Freq_m, Freq_q)
 
+# Indicators' releasing delay
 Unb_m   <- all_countries$data[[country]]$unb_m
 Unb_q   <- all_countries$data[[country]]$unb_q[q_cols]
 Unb     <- c(Unb_m, Unb_q)
 
+# Indicators' class (Real, Nominal, Financial, Survey)
 Class_m <- all_countries$data[[country]]$ClassM
 Class_q <- all_countries$data[[country]]$ClassQ[q_cols]
 Class   <- c(Class_m, Class_q)
 
 # ==============================================================================
-# 7. EM ALGORITHM: RECONSTRUCT THE MATRIX OF PREDICTORS
+# 2. NA's IMPUTATION          : XIONG & PELGER (2020)
+# 3. LATENT FACTOR EXTRACTION : Ahn (2011)
 # ==============================================================================
 
-# Standardization of Predictors
+# Standardization
 out_std <- standardize_with_na(X)
 X_std   <- out_std$X_std
 
-# Initialization using Xiong and Pelger "all Purposes Estimator"
-init <- init_XP_ER(X_std)
+# Imputation 
+imp_xp  <- init_XP_ER(X_std, params$Kmax)
 
-X_init <- init$X_init
-r      <- init$r
+X_xp    <- imp_xp$X_init     # Imputed Data
+r_hat   <- imp_xp$r          # Number of latent factors in the imputed data
 
-# Matrix A to map low frequency to high frequency variables
-A <- A_list(X, N_q, agg_q)
+# ================================
+# 3.1 AGGREGATION TO LOW FREQUENCY
+# ================================
 
-# EM algorithm 
-EM_out <- EM_algorithm(X_init, X_std, A, r, max_iter = 100, tol = 1e-4)
+X_m_xp   <- X_xp[,1:N_m]
+X_q_xp   <- X_xp[,(N_m+1):N]
 
-# Reconstruct the quarterly matrix of predictors
-X_em   <- EM_out$X_completed
+X_mq_xp  <- agg_mq(X_m_xp, agg_m)
+X_qq_xp  <- agg_qq(X_q_xp, agg_q)
 
-# De-standardization of Predictors
-# X_em       <- destandardize(X_em_std, out_std$mean, out_std$sd)
-X_m_em     <- X_em[,1:N_m]
-X_q_em     <- X_em[,(N_m+1):N]
-
-X_mq_em <- agg_mq(X_m_em, agg_m)
-X_qq_em <- agg_qq(X_q_em, agg_q)
-
-X_em_agg <- cbind(X_mq_em, X_qq_em)
-
+X_xp_agg <- cbind(X_mq_xp, X_qq_xp)
 
 # ==============================================================================
-# 8. FIND THE NUMBER OF PROXY AND U-MIDAS LAGS IN THE WHOLE DATASET INCLUDING TARGET
+# 4. NUMBER OF PROXY : KREAMER & SUGIYAMA (2013) 
 # ==============================================================================
 
-# IC. Kraemer & Sugiyama
-pls.object <- select_L_autoproxy_3prf(X_em_agg, y_q, Zmax = params$Zmax)
+pls.object <- select_L_autoproxy_3prf(X_xp_agg, y_q, Zmax = params$Zmax)
 Lproxy     <- pls.object$L_opt
 
-# Number of U-MIDAS LAG
+# ==============================================================================
+# 5. NUMBER OF U-MIDAS LAGS
+# ==============================================================================
+
 lag_sel <- choose_UMIDAS_lag(
-  X_lf        = X_em_agg,
-  X_hf        = X_em,
+  X_lf        = X_xp_agg,
+  X_hf        = X_xp,
   y_q         = y_q,
   Lmax        = params$Lmax,
   Lproxy      = Lproxy,
-  p_AR        = params$p_AR,
+  p_AR_max    = params$p_AR_max,   
   Robust_F    = params$Robust_F,
   alpha       = params$alpha,
   robust_type = params$robust_type,
   nw_lag      = params$nw_lag
 )
 
-L_midas <- lag_sel$lag_BIC
+L_midas <- lag_sel$best_BIC$L
+p_ar    <- lag_sel$best_BIC$p_AR
 
 # ==============================================================================
-# 9. MF-TPRF
+# 6. MF-TPRF
 # ==============================================================================
 
 MF_TPRF_out <- MF_TPRF(
-  X_lf        = X_em_agg,
-  X_hf        = X_em,
+  X_lf        = X_xp_agg,
+  X_hf        = X_xp,
   y_q         = y_q,
   Lproxy      = Lproxy,
   L_midas     = L_midas,
-  p_AR        = params$p_AR,
+  p_AR        = p_ar,
   Robust_F    = params$Robust_F,
   alpha       = params$alpha,
   robust_type = params$robust_type,
@@ -286,7 +294,7 @@ MF_TPRF_out <- MF_TPRF(
 
 
 # ==============================================================================
-# 14. SAVE ALL RESULTS TO COUNTRY-SPECIFIC FOLDER
+# 6.1 SAVE ALL RESULTS TO COUNTRY-SPECIFIC FOLDER
 # ==============================================================================
 
 ## 14.1 Create folder for the country
@@ -301,19 +309,14 @@ file_out <- file.path(
   paste0(
     "MF_TPRF_",      country,
     "_sel-",         params$sel_method,
-    "_Lproxy-",      Lproxy,
-    "_L_midas-",     L_midas,
     "_Nm-",          N_m,
     "_Nq-",          N_q,
-    "_p-AR",         params$p_AR,
+    "_Lproxy-",      Lproxy,
+    "_L_midas-",     L_midas,
+    "_p-AR",         p_ar,
     "_Robust-F_",    params$Robust_F,
-    "_alpha-",       params$alpha,
-    "_robust-type_", params$robust_type,
-    "_nw-lag_",      params$nw_lag,
     "_Covid_m-",     params$covid_mask_m,
     "_Covid_q-",     params$covid_mask_q,
-    "_",             format(params$start_est, "%Y-%m"),
-    "_to_",          format(params$end_eval, "%Y-%m"),
     ".rds"
   )
 )
@@ -325,17 +328,14 @@ saveRDS(
     country = country,
     params  = params,
     
-    # EM Results
-    A_list     = A,
-    X_init     = X_init,
-    X_em       = X_em,
-    F_EM       = EM_out$F,
-    Phi_EM     = EM_out$Phi,
-    EM_iter    = EM_out$iterations,
-    EM_diffs   = EM_out$diffs,
-    X_mq_em    = X_mq_em,
-    X_qq_em    = X_qq_em,
-    X_em_agg   = X_em_agg,
+    # Imputation Results
+    imp_xp     = imp_xp,
+    X_xp       = X_xp,
+    F_xp       = imp_xp$F_hat,
+    lambda_xp  = imp_xp$lambda,
+    X_mq_xp    = X_mq_xp,
+    X_qq_xp    = X_qq_xp,
+    X_xp_agg   = X_xp_agg,
     
     # MF-3PRF Results
     UMIDAS_lag = lag_sel,
@@ -344,7 +344,7 @@ saveRDS(
   file_out
 )
 
-cat("\n*** SAVED EM + MF-3PRF RESULTS TO ***\n", file_out, "\n")
+cat("\n*** SAVED MF-TPRF RESULTS TO ***\n", file_out, "\n")
 
 
 
@@ -353,14 +353,13 @@ cat("\n*** SAVED EM + MF-3PRF RESULTS TO ***\n", file_out, "\n")
 
 
 # ==============================================================================
-# 15. PSEUDO REAL-TIME FORECASTING EXERCISE (WITH RELEASE SCHEDULE)
+# 7. PSEUDO REAL-TIME FORECASTING EXERCISE
 # ==============================================================================
 
-# Questo esercizio implementa il vero pseudo real-time MF-3PRF + EM,
-# rispettando calendario dei rilasci, unbalancedness dati, revisione dei fattori
-# e disponibilità delle variabili ad alta e bassa frequenza.
+# Pseudo real time nowcasting accounting for frequency mismatch and asyncronous
+# release of macroeconomic indicators 
 
-pseudo_realtime_raw <- pseudo_realtime_TPRF_EM(
+pseudo_realtime_raw <- pseudo_realtime_MF_TPRF_XP(
   X_full  = X,         # full mixed-frequency predictor matrix (with NA)
   y_q     = y_q,       # true quarterly target
   params  = params,    # all model parameters (include start_eval, end_eval, Lmax_midas)
@@ -368,7 +367,6 @@ pseudo_realtime_raw <- pseudo_realtime_TPRF_EM(
   dates_q = dates_q,   # quarterly publication dates
   Freq    = Freq,      # vector: monthly/quarterly frequency classification
   Unb     = Unb,       # unbalancedness info (lag di pubblicazione in mesi)
-  Type    = Type,      # flow/stock/custom ecc. (se serve a monte)
   agg_m   = agg_m,     # schema aggregazione mensile -> trimestrale
   agg_q   = agg_q      # schema aggregazione trimestrale
 )
@@ -401,21 +399,18 @@ if (!dir.exists(path_country)) {
   dir.create(path_country, recursive = TRUE)
 }
 
-# Construct output filename (molto parlante)
+# Construct output filename
 file_out <- file.path(
   path_country,
   paste0(
-    "MF3PRF_pseudoRT_", country,
+    "MF_TPRF_RT_",   country,
     "_sel-",         params$sel_method,
-    "_Lproxy-",      pseudo_realtime_raw$Lproxy_fix,
-    "_Lmidas-",      pseudo_realtime_raw$L_midas_fix,
     "_Nm-",          N_m,
     "_Nq-",          N_q,
-    "_p-AR",         params$p_AR,
+    "_Lproxy-",      pseudo_realtime_raw$hyper_pre$Lproxy,
+    "_Lmidas-",      pseudo_realtime_raw$hyper_pre$L_midas,
+    "_p-AR",         pseudo_realtime_raw$hyper_pre$p_AR,
     "_Robust-F_",    params$Robust_F,
-    "_alpha-",       params$alpha,
-    "_robust-type_", params$robust_type,
-    "_nw-lag_",      params$nw_lag,
     "_Covid_m-",     params$covid_mask_m,
     "_Covid_q-",     params$covid_mask_q,
     ".rds"

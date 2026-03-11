@@ -60,6 +60,8 @@ library(tseries)
 library(zoo)
 library(fBasics)
 library(vars)
+library(glmnet)
+library(plsdof)
 
 # Linear Algebra & Utilities
 library(Matrix)
@@ -96,41 +98,32 @@ source(file.path(path_func, "dmfm.results.R"))
 
 # Users's parameters
 params <- list(
-  start_est   = as.Date("2000-02-01"),
+  start_est   = as.Date("2000-04-01"),
   start_eval  = as.Date("2017-01-01"),
-  end_eval    = as.Date("2025-09-01"),
+  end_eval    = as.Date("2025-10-01"),
   covid_start = as.Date("2020-03-01"),
   covid_end   = as.Date("2021-07-01"),
-  covid_mask  = TRUE,    # boolean, not string
-  target      = "GDP",   # quarterly target variable
-  sel_method  = "corr_threshold", # "none" | "corr_threshold" | "F-Test"
+  covid_mask_m = TRUE,                     # Boolean: if empty == TRUE
+  covid_mask_q = FALSE,                    # Boolean: if empty == TRUE
+  target      = "GDP",                     # quarterly target variable
+  sel_method  = "none",                  # "none" | "corr_threshold" | "F-Test" | "LASSO"
   
   # Variable selection parameters
-  n_m        = 38,
-  n_q        = 2,
-  thr_m      = 0.10,
-  thr_q      = 0.85,
-  thr_F_test = 0.01
+  n_m          = 38,
+  n_q          = 10,
+  thr_m        = 0.10,
+  thr_q        = 0.85,
+  thr_F_test   = 0.01,
+  alpha_lasso  = 1,                        # 1=LASSO, 0=Ridge, (0,1)=Elastic Net
+  
+  kmax         = c(3, 7),                           # Initial upper bounds for number of factors
+  kappa        = 1e-4
 )
 
-
-# Quarterly Treatment
-R_mat <- matrix(c(
-  2, -1, 0,  0,  0,
-  3,  0, -1, 0,  0,
-  2,  0,  0, -1, 0,
-  1,  0,  0,  0, -1
-), nrow = 4, byrow = TRUE)
-
-q <- rep(0, 4)
-
-
-kmax <- c(3, 7)  # Initial upper bounds for number of factors
 
 # Country List
 countries <- c("DE", "FR", "IT", "ES")
 
-country <- "ES"
 # ==============================================================================
 # 4. PREPARE DATA FOR ALL COUNTRIES AND EXCTARCT THE ONE OF INTEREST
 # ==============================================================================
@@ -146,16 +139,8 @@ all_countries <- prepare_all_countries(
 # ==============================================================================
 # STEP 2: BUILD TENSOR DATASET (T × p1 × p2)
 # ==============================================================================
-# 2) Costruzione del tensore DMFM
-tensor <- build_tensor_dmfm(all_countries, countries = countries, span = "union")
 
-str(tensor$Y)  # [1] T_global  P1  P2
-str(tensor$W)
-tensor$vars      # nomi delle variabili comuni (base names)
-tensor$dates[1]  # prima data
-tail(tensor$dates, 1)  # ultima data
-
-
+tensor <- build_tensor(all_countries, params, "intersection")
 
 Y <- tensor$Y  # Data tensor
 W <- tensor$W  # Mask (missing indicator)
@@ -168,62 +153,21 @@ Y_std <- std$Y_scaled
 nan_percent_Y(Y_std)
 gdp_idx <- which(dimnames(tensor$Y)[[3]] == params$target)
 
-
-
-################################# !is.na GDP ###################################
-
-
-ea_index <- which(dimnames(tensor$Y)[[2]] == country)
-gdp_idx <- which(dimnames(tensor$Y)[[3]] == params$target)
-
-# Estrai la serie del GDP (standardizzata)
-gdp_ts <- tensor$Y[, ea_index, gdp_idx]
-
-
-# Serie temporale con Date
-gdp_df <- data.frame(
-  Date = tensor$dates,              # oppure converti in trimestre con get_quarter()
-  GDP  = gdp_ts
-)
-
-ggplot(gdp_df, aes(x = Date, y = GDP)) +
-  geom_line(color = "#1f77b4", size = 1) +
-  geom_point(data = subset(gdp_df, !is.na(GDP)), color = "black", size = 1.5) +
-  labs(
-    title = "Observed GDP Series from Tensor",
-    subtitle = "Standardized GDP values for Italy (example)",
-    x = "Date", y = "GDP (Standardized)"
-  ) +
-  theme_minimal(base_size = 13)
-
-
 # ==============================================================================
 # STEP 3: FACTOR ESTIMATION
 # ==============================================================================
 
 ## === DMFM Pipeline === ##
-k_hat <- mfm.f(Y_std, W, kmax)  # Estimate number of factors
+k_hat <- mfm.f(Y_std, W, params$kmax)                   # Estimate number of factors
 f.lag_mar <- mar_model_selection_auto(Y_std, W, k_hat)  # Select lag order
-
-## === DFM Alternative === ##
-# k_hat <- dfm.f.vec(Y_std, W, kmax)
-# f.lag_mar <- mar_model_selection_vec(Y_std, W, k_hat)
-
 
 # ==============================================================================
 # STEP 4: INITIALIZE MODEL INPUTS
 # ==============================================================================
 
-# k_hat <- c(1,3)
-
 ## === DMFM Initialization === ##
-imp <- mfm.cl(Y_std, W, k_hat)
-inputs <- dmfm.na.2.sv(imp$Y_imputed, k_hat, W, t = "dmfm")
-
-## === DFM Alternative Initialization === ##
-# imp <- mfm.cl.vec(Y_std, W, k_hat)
-# inputs <- dmfm.na.2.sv.vec(imp$Y_imputed, k_hat, W, t = "dmfm")
-
+# inputs <- dmfm.na.2.sv(Y_std, k_hat, W, t = "dmfm")
+inputs <- dmfm.na.2.sv.idio(Y_std, k_hat, W, t = "dmfm", kappa = params$kappa)
 
 # ==============================================================================
 # STEP 5: FIT DMFM USING FULL DATASET

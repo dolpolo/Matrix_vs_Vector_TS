@@ -52,6 +52,57 @@ compute_m_tr <- function(date_t, dates_q) {
 
 
 # ==============================================================================
+# prepara dataset “XP-imputed + aggregated” fino a una data tt
+# ==============================================================================
+
+build_XP_agg_up_to <- function(X_full, y_q, dates, dates_q, Freq, Unb,
+                               current_t, agg_m, agg_q,
+                               Kmax = 10) {
+  
+  # 1) ragged edge
+  X_cut <- unbalancedness(
+    X_full    = X_full,
+    dates     = dates,
+    Freq      = Freq,
+    Unb       = Unb,
+    current_t = current_t
+  )
+  
+  # 2) standardize
+  out_std <- standardize_with_na(X_cut)
+  X_std   <- out_std$X_std
+  
+  # 3) XP imputation + r selection
+  imp_xp <- init_XP_ER(X_std)   # se hai Kmax interno, passa Kmax = Kmax
+  X_xp   <- imp_xp$X_init
+  r_est  <- imp_xp$r
+  
+  # 4) split M/Q and aggregate
+  X_m_xp <- X_xp[, Freq == "M", drop = FALSE]
+  X_q_xp <- X_xp[, Freq == "Q", drop = FALSE]
+  
+  X_mq_xp <- agg_mq(X_m_xp, agg_m)
+  X_qq_xp <- agg_qq(X_q_xp, agg_q)
+  
+  X_xp_agg <- cbind(X_mq_xp, X_qq_xp)
+  
+  # 5) GDP quarters available at current_t
+  idx_pub <- which(dates_q < dates[current_t])
+  if (length(idx_pub) < 2) return(NULL)
+  
+  T_q_current <- tail(idx_pub, 1)
+  T_q_current <- min(T_q_current, nrow(X_xp_agg))
+  
+  list(
+    X_hf = X_xp,                       # monthly completed
+    X_lf = X_xp_agg,                   # quarterly aggregated predictors
+    y_q  = as.numeric(y_q)[1:T_q_current],
+    T_q  = T_q_current,
+    r    = r_est
+  )
+}
+
+# ==============================================================================
 # EXPANDING NOWCAST
 # ==============================================================================
 
@@ -61,256 +112,206 @@ compute_m_tr <- function(date_t, dates_q) {
 # tt <- 305 # [M2]
 # tt <- 306 # [M3]
 
-pseudo_realtime_TPRF_EM <- function(
-    X_full,      # matrice mensile completa (T_m x N)
-    y_q,         # vettore trimestrale GDP (T_q)
-    params,
-    dates,       # date mensili (lunghezza T_m)
-    dates_q,     # date trimestrali (lunghezza T_q)
-    Freq,        # vettore "M"/"Q" per ciascuna colonna di X_full
-    Unb,         # ritardo di pubblicazione (in mesi) per ciascuna colonna di X_full
-    Type,        # (se ti serve per altro, qui non lo uso)
-    agg_m,       # oggetto per aggregazione mensile->trimestrale (per X_m)
-    agg_q        # oggetto per aggregazione trimestrale (per X_q)
+pseudo_realtime_MF_TPRF_XP <- function(
+    X_full, y_q, params,
+    dates, dates_q,
+    Freq, Unb,
+    agg_m, agg_q
 ) {
+  
   # --------------------------------------------
-  # 0. Evaluation window
+  # 0) Evaluation window
   # --------------------------------------------
   t_start <- which(dates == params$start_eval)
   t_end   <- which(dates == params$end_eval)
-  
-  if (length(t_start) == 0 | length(t_end) == 0) {
+  if (length(t_start) == 0 || length(t_end) == 0)
     stop("start_eval o end_eval non trovati in 'dates'.")
-  }
   
   # --------------------------------------------
-  # 0.b Estimation window per Lproxy, L_midas
-  #     (tutte le date < start_eval)
+  # 1) Hyper selection #1 (pre-eval): up to start_eval-1
   # --------------------------------------------
   t_est_end <- max(which(dates < params$start_eval))
-  if (length(t_est_end) == 0 || t_est_end < 24) {
+  if (length(t_est_end) == 0 || t_est_end < 24)
     stop("Estimation sample troppo corto o non definito.")
-  }
   
-  cat("\n>>> HYPER-PARAM SELECTION using data up to",
+  cat("\n>>> HYPER #1 selection using data up to",
       as.character(dates[t_est_end]), "\n")
   
-  ## --- Pre-step: costruisco dataset mensile/trimestrale "estimation" ---
-  
-  # Unbalancedness alla data t_est_end
-  X_cut_est <- unbalancedness(
-    X_full    = X_full,
-    dates     = dates,
-    Freq      = Freq,
-    Unb       = Unb,
-    current_t = t_est_end
+  obj_est1 <- build_XP_agg_up_to(
+    X_full   = X_full,
+    y_q      = y_q,
+    dates    = dates,
+    dates_q  = dates_q,
+    Freq     = Freq,
+    Unb      = Unb,
+    current_t = t_est_end,
+    agg_m    = agg_m,
+    agg_q    = agg_q,
+    Kmax     = params$Kmax
   )
+  if (is.null(obj_est1)) stop("Non abbastanza GDP pubblicato per hyper #1.")
   
-  # A_list per EM
-  N_q  <- sum(Freq == "Q")
-  A_est <- A_list(X_cut_est, N_q, agg_q)
+  # Lproxy
+  pls1 <- select_L_autoproxy_3prf(obj_est1$X_lf[1:obj_est1$T_q, , drop=FALSE],
+                                  obj_est1$y_q,
+                                  Zmax = params$Zmax)
+  Lproxy_1 <- pls1$L_opt
   
-  # Standardization
-  out_std_est <- standardize_with_na(X_cut_est)
-  X_std_est   <- out_std_est$X_std
-  
-  # Init EM (qui init_XP_ER seleziona r)
-  init_est   <- init_XP_ER(X_std_est)
-  X_init_est <- init_est$X_init
-  r_est      <- init_est$r
-  
-  # EM
-  EM_out_est <- EM_algorithm(X_init_est, X_std_est, A_est,
-                             r = r_est, max_iter = 50, tol = 1e-4)
-  X_em_est   <- EM_out_est$X_completed
-  T_m_est    <- nrow(X_em_est)
-  
-  # Separa M / Q e aggrega a trimestrale
-  N_m  <- sum(Freq == "M")
-  X_m_em_est <- X_em_est[, Freq == "M", drop = FALSE]
-  X_q_em_est <- X_em_est[, Freq == "Q", drop = FALSE]
-  
-  X_mq_em_est <- agg_mq(X_m_em_est, agg_m)
-  X_qq_em_est <- agg_qq(X_q_em_est, agg_q)
-  
-  X_em_agg_est <- cbind(X_mq_em_est, X_qq_em_est)
-  T_q_em_est   <- nrow(X_em_agg_est)
-  
-  # Quanti trimestri di PIL sono pubblicati a t_est_end?
-  idx_pub_est <- which(dates_q < dates[t_est_end])
-  if (length(idx_pub_est) < 2) {
-    stop("Troppo pochi trimestri di PIL nell'estimation sample.")
-  }
-  T_q_current_est <- tail(idx_pub_est, 1)
-  T_q_current_est <- min(T_q_current_est, T_q_em_est)
-  
-  y_q_est   <- y_q[1:T_q_current_est]
-  X_lf_est  <- X_em_agg_est[1:T_q_current_est, , drop = FALSE]
-  X_hf_est  <- X_em_est[1:T_m_est, , drop = FALSE]
-  
-  ## --- Scelta Lproxy IC. Kraemer & Sugiyama ---
-  pls.object_v   <- select_L_autoproxy_3prf(X_lf_est, y_q_est, Zmax = params$Zmax)
-  Lproxy_fix     <- pls.object_v$L_opt
-  
-  cat("# [Hyper] Lproxy selected on estimation sample:", Lproxy_fix, "\n")
-  
-  ## --- Scelta L_midas su base trimestrale (estimation) ---
-  
-  lag_sel_est <- choose_UMIDAS_lag(
-    X_lf       = X_lf_est,
-    X_hf       = X_hf_est,
-    y_q        = y_q_est,
-    Lproxy     = Lproxy_fix,
-    Lmax       = params$Lmax,
-    Robust_F   = params$Robust_F,
-    alpha      = params$alpha,
+  # (p_AR, L) via BIC
+  lag1 <- choose_UMIDAS_lag(
+    X_lf        = obj_est1$X_lf[1:obj_est1$T_q, , drop=FALSE],
+    X_hf        = obj_est1$X_hf,
+    y_q         = obj_est1$y_q,
+    Lmax        = params$Lmax,
+    Lproxy      = Lproxy_1,
+    p_AR_max    = params$p_AR_max,
+    Robust_F    = params$Robust_F,
+    alpha       = params$alpha,
     robust_type = params$robust_type,
-    nw_lag      = params$nw_lag,
-    p_AR        = params$p_AR   # se l'hai aggiunto in choose_UMIDAS_lag
+    nw_lag      = params$nw_lag
   )
+  L_midas_1 <- lag1$best_BIC$L
+  p_ar_1    <- lag1$best_BIC$p_AR
+  r_1       <- obj_est1$r
   
-  L_midas_fix <- lag_sel_est$lag_BIC
-  cat("# [Hyper] L_midas selected on estimation sample (BIC):",
-      L_midas_fix, "\n")
+  cat("# Hyper #1:",
+      "Lproxy =", Lproxy_1,
+      "| L_midas =", L_midas_1,
+      "| p_AR =", p_ar_1,
+      "| r =", r_1, "\n")
   
-  # ------------------------------------------------
-  # Ora passo alla evaluation window con hyper fissi
-  # ------------------------------------------------
+  # --------------------------------------------
+  # 2) Hyper selection #2 (post-COVID recalibration)
+  #    la facciamo una volta sola: alla prima data >= covid_end
+  # --------------------------------------------
+  t_recalib <- which(dates >= params$covid_end)[1]
+  do_recalib <- !is.na(t_recalib) && t_recalib <= t_end
   
+  Lproxy_2 <- Lproxy_1
+  L_midas_2 <- L_midas_1
+  p_ar_2 <- p_ar_1
+  r_2 <- r_1
+  
+  if (do_recalib) {
+    cat("\n>>> HYPER #2 selection using data up to",
+        as.character(dates[t_recalib]), "\n")
+    
+    obj_est2 <- build_XP_agg_up_to(
+      X_full    = X_full,
+      y_q       = y_q,
+      dates     = dates,
+      dates_q   = dates_q,
+      Freq      = Freq,
+      Unb       = Unb,
+      current_t = t_recalib,
+      agg_m     = agg_m,
+      agg_q     = agg_q,
+      Kmax      = params$Kmax
+    )
+    
+    if (!is.null(obj_est2)) {
+      pls2 <- select_L_autoproxy_3prf(obj_est2$X_lf[1:obj_est2$T_q, , drop=FALSE],
+                                      obj_est2$y_q,
+                                      Zmax = params$Zmax)
+      Lproxy_2 <- pls2$L_opt
+      
+      lag2 <- choose_UMIDAS_lag(
+        X_lf        = obj_est2$X_lf[1:obj_est2$T_q, , drop=FALSE],
+        X_hf        = obj_est2$X_hf,
+        y_q         = obj_est2$y_q,
+        Lmax        = params$Lmax,
+        Lproxy      = Lproxy_2,
+        p_AR_max    = params$p_AR_max,
+        Robust_F    = params$Robust_F,
+        alpha       = params$alpha,
+        robust_type = params$robust_type,
+        nw_lag      = params$nw_lag
+      )
+      L_midas_2 <- lag2$best_BIC$L
+      p_ar_2    <- lag2$best_BIC$p_AR
+      r_2       <- obj_est2$r
+      
+      cat("# Hyper #2:",
+          "Lproxy =", Lproxy_2,
+          "| L_midas =", L_midas_2,
+          "| p_AR =", p_ar_2,
+          "| r =", r_2, "\n")
+    } else {
+      cat("(!) Hyper #2 skipped: not enough GDP published at recalib date.\n")
+    }
+  }
+  
+  # --------------------------------------------
+  # 3) Real-time loop (expanding) with fixed hypers
+  # --------------------------------------------
   now_M1 <- list()
   now_M2 <- list()
   now_M3 <- list()
   
-  N      <- ncol(X_full)
-  
-  # --------------------------------------------
-  # 1. EXPANDING NOWCAST LOOP sui mesi tt
-  # --------------------------------------------
   for (tt in seq(t_start, t_end)) {
     
     date_t <- dates[tt]
-    cat("\n>>> REAL-TIME at", as.character(date_t),
-        "| Lproxy_fix =", Lproxy_fix,
-        "| L_midas_fix =", L_midas_fix, "\n")
     
-    # --------------------------
-    # Step 1: Unbalanced cut
-    # --------------------------
-    X_cut <- unbalancedness(
+    # scegli regime hyper
+    use_post <- do_recalib && tt >= t_recalib
+    Lproxy_use <- if (use_post) Lproxy_2 else Lproxy_1
+    L_midas_use <- if (use_post) L_midas_2 else L_midas_1
+    p_ar_use <- if (use_post) p_ar_2 else p_ar_1
+    
+    cat("\n>>> REAL-TIME at", as.character(date_t),
+        "| regime =", if (use_post) "post-COVID" else "pre-COVID",
+        "| Lproxy =", Lproxy_use,
+        "| L_midas =", L_midas_use,
+        "| p_AR =", p_ar_use, "\n")
+    
+    obj_rt <- build_XP_agg_up_to(
       X_full    = X_full,
+      y_q       = y_q,
       dates     = dates,
+      dates_q   = dates_q,
       Freq      = Freq,
       Unb       = Unb,
-      current_t = tt
+      current_t = tt,
+      agg_m     = agg_m,
+      agg_q     = agg_q,
+      Kmax      = params$Kmax
     )
+    if (is.null(obj_rt) || length(obj_rt$y_q) < 2) next
     
-    # --------------------------
-    # Step 2: Build A_list (per EM)
-    # --------------------------
-    A <- A_list(X_cut, N_q, agg_q)
+    # taglia ai trimestri disponibili (coerente con GDP pubblicato)
+    X_lf_cut <- obj_rt$X_lf[1:obj_rt$T_q, , drop = FALSE]
+    y_q_cut  <- obj_rt$y_q
+    X_hf_cut <- obj_rt$X_hf
     
-    # --------------------------
-    # Step 3: Standardization
-    # --------------------------
-    out_std <- standardize_with_na(X_cut)
-    X_std   <- out_std$X_std
-    
-    # --------------------------
-    # Step 4: Init EM
-    # --------------------------
-    init   <- init_XP_ER(X_std, Kmax = r_est)
-    X_init <- init$X_init
-    r      <- init$r      # numero di fattori (può variare nel tempo se vuoi)
-    
-    # --------------------------
-    # Step 5: EM
-    # --------------------------
-    EM_out <- EM_algorithm(X_init, X_std, A, r, max_iter = 50, tol = 1e-4)
-    X_em   <- EM_out$X_completed
-    T_m_cur <- nrow(X_em)
-    
-    # --------------------------
-    # Step 6: separa mensili / trimestrali e aggrega
-    # --------------------------
-    X_m_em <- X_em[, Freq == "M", drop = FALSE]
-    X_q_em <- X_em[, Freq == "Q", drop = FALSE]
-    
-    X_mq_em <- agg_mq(X_m_em, agg_m)
-    X_qq_em <- agg_qq(X_q_em, agg_q)
-    
-    X_em_agg <- cbind(X_mq_em, X_qq_em)
-    T_q_em   <- nrow(X_em_agg)
-    
-    # --------------------------
-    # Step 7: trimestri di PIL pubblicati a date_t
-    # --------------------------
-    idx_pub <- which(dates_q < date_t)
-    if (length(idx_pub) < 2) {
-      next
-    }
-    T_q_current <- tail(idx_pub, 1)
-    T_q_current <- min(T_q_current, T_q_em)
-    
-    # --------------------------
-    # Step 8: taglia y_q e X_lf/X_hf ai trimestri utilizzabili
-    # --------------------------
-    y_q_cut   <- y_q[1:T_q_current]
-    X_lf_cut  <- X_em_agg[1:T_q_current, , drop = FALSE]
-    X_hf_cut  <- X_em[1:T_m_cur, , drop = FALSE]
-    
-    if (length(y_q_cut) < 2) next
-    
-    # --------------------------
-    # Step 9 & 10: ORA NON seleziono più Lproxy e L_midas
-    #              Li uso fissi: Lproxy_fix, L_midas_fix
-    # --------------------------
-    
-    Lproxy  <- Lproxy_fix
-    L_midas <- L_midas_fix
-    
-    # --------------------------
-    # Step 11: MF-TPRF su sotto-campione (con hyper fissi)
-    # --------------------------
-    MF_TPRF_RT_out <- MF_TPRF(
-      X_lf      = X_lf_cut,
-      X_hf      = X_hf_cut,
-      y_q       = y_q_cut,
-      Lproxy    = Lproxy,
-      L_midas   = L_midas,
-      p_AR      = params$p_AR,
-      Robust_F  = params$Robust_F,
-      alpha     = params$alpha,
+    # MF-TPRF con hyper fissati
+    out <- MF_TPRF(
+      X_lf        = X_lf_cut,
+      X_hf        = X_hf_cut,
+      y_q         = y_q_cut,
+      Lproxy      = Lproxy_use,
+      L_midas     = L_midas_use,
+      p_AR        = p_ar_use,
+      Robust_F    = params$Robust_F,
+      alpha       = params$alpha,
       robust_type = params$robust_type,
       nw_lag      = params$nw_lag
     )
     
-    y_rt_full <- MF_TPRF_RT_out$y_nowcast
-    y_rt_last <- tail(y_rt_full, 1)
+    y_rt_last <- tail(out$y_nowcast, 1)
     
-    # --------------------------
-    # Step 12: attribuisco il nowcast a M1/M2/M3 del trimestre target
-    # --------------------------
-    m_tr <- compute_m_tr(date_t, dates_q)    # 1,2,3 oppure NA
+    m_tr <- compute_m_tr(date_t, dates_q)  # tua funzione: 1/2/3
     if (is.na(m_tr)) next
     
     key <- as.character(date_t)
-    
     if (m_tr == 1) now_M1[[key]] <- y_rt_last
     if (m_tr == 2) now_M2[[key]] <- y_rt_last
     if (m_tr == 3) now_M3[[key]] <- y_rt_last
   }
   
-  return(list(
-    Lproxy_fix  = Lproxy_fix,
-    L_midas_fix = L_midas_fix,
-    M1 = now_M1,
-    M2 = now_M2,
-    M3 = now_M3
-  ))
+  list(
+    hyper_pre  = list(Lproxy = Lproxy_1, L_midas = L_midas_1, p_AR = p_ar_1, r = r_1),
+    hyper_post = list(Lproxy = Lproxy_2, L_midas = L_midas_2, p_AR = p_ar_2, r = r_2,
+                      t_recalib = if (do_recalib) dates[t_recalib] else NA),
+    M1 = now_M1, M2 = now_M2, M3 = now_M3
+  )
 }
-
-
-
-
-
-

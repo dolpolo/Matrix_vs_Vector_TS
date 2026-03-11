@@ -194,41 +194,6 @@ M_step <- function(X_old, r) {
 }
 
 
-
-# ==============================================================================
-# Initialization for EM (Hepenstrick & Marcellino)
-# XP covariance + ER + XP factors → replace NAs with common component
-# ==============================================================================
-
-init_XP_ER <- function(X_std, Kmax = 15) {
-  # 1. Covariance estimator
-  cov_out <- all_purpose_covariance(X_std)
-  
-  # 2. Number of factors via ER
-  ER_out <- select_num_factors_ER(cov_out$Sigma_tilde, Kmax = Kmax)
-  r      <- ER_out$r
-  
-  # 3. Factors and common component (XP)
-  fac_out <- estimate_factors_XP(X_std, r)
-  C_hat   <- fac_out$C_hat
-  
-  # 4. Replace only missing entries with the common component
-  X_init <- X_std
-  na_idx <- is.na(X_std)
-  X_init[na_idx] <- C_hat[na_idx]
-  
-  list(
-    X_init = X_init,          # T x N, no NAs (for EM)
-    r      = r,
-    Sigma  = cov_out$Sigma_tilde,
-    Lambda = fac_out$Lambda,
-    F_hat  = fac_out$F_hat,
-    C_hat  = C_hat,
-    ER     = ER_out$ER
-  )
-}
-
-
 # ==============================================================================
 # 3. EM ALGORITHM LOOP
 # X_init : T x N initial completed panel (no NA), e.g. from XP+ER

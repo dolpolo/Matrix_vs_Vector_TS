@@ -1,28 +1,24 @@
 
 # ==============================================================================
-# 1. LOAD RESULTS (EM + MF-3PRF)
+# 1. LOAD RESULTS (MF-3PRF)
 # ==============================================================================
 
-path_country <- file.path(path_results, country)
+path_country <- file.path(path_results_vec, country)
+# path_country <- file.path(path_results, country)
 
 file_results <- file.path(
   path_country,
   paste0(
     "MF_TPRF_",      country,
     "_sel-",         params$sel_method,
-    "_Lproxy-",      Lproxy,
-    "_L_midas-",     L_midas,
     "_Nm-",          N_m,
     "_Nq-",          N_q,
-    "_p-AR",         params$p_AR,
+    "_Lproxy-",      Lproxy,
+    "_L_midas-",     L_midas,
+    "_p-AR",         p_ar,
     "_Robust-F_",    params$Robust_F,
-    "_alpha-",       params$alpha,
-    "_robust-type_", params$robust_type,
-    "_nw-lag_",      params$nw_lag,
     "_Covid_m-",     params$covid_mask_m,
     "_Covid_q-",     params$covid_mask_q,
-    "_",             format(params$start_est, "%Y-%m"),
-    "_to_",          format(params$end_eval, "%Y-%m"),
     ".rds"
   )
 )
@@ -105,7 +101,7 @@ df_now_full <- data.frame(
 
 df_quarterly <- data.frame(
   date   = dates_q,
-  y_true = y_true_q
+  y_true = as.numeric(y_true_q)
 )
 
 
@@ -268,36 +264,12 @@ latex_tab <- paste0(
 
 cat(latex_tab)
 
-# ==============================================================================
-# 7. CONVERGENCE OF THE EM ALGORITHM
-# ==============================================================================
-
-# Se hai ricaricato dal file .rds:
-em_diffs <- MF_TPRF_res$EM_diffs   # li avevi salvati come EM_diffs = EM_out$diffs
-
-df_em <- data.frame(
-  iter = seq_along(em_diffs),
-  diff = em_diffs
-)
-
-plot_em <- ggplot(df_em, aes(x = iter, y = diff)) +
-  geom_line() +
-  geom_point() +
-  labs(
-    title = paste0("EM convergence – ", country),
-    x = "Iteration",
-    y = "Max change in X"
-  ) +
-  theme_minimal(base_size = 14)
-
-print(plot_em)
-
 
 # ==============================================================================
 # 8. SAVE GRAPHS TO COUNTRY FOLDER
 # ==============================================================================
 
-path_graph_country <- file.path(path_graph, country)
+path_graph_country <- file.path(path_graph_vec, country)
 if (!dir.exists(path_graph_country)) {
   dir.create(path_graph_country, recursive = TRUE)
 }
@@ -306,44 +278,16 @@ if (!dir.exists(path_graph_country)) {
 file_graph_now <- file.path(
   path_graph_country,
   paste0(
-    "MF3PRF_Nowcast_", country,
-    "_sel-",           params$sel_method,
-    "_Lproxy-",        Lproxy,
-    "_L_midas-",       L_midas,
-    "_Nm-",            N_m,
-    "_Nq-",            N_q,
-    "_p-AR",           params$p_AR,
-    "_Robust-F_",      params$Robust_F,
-    "_alpha-",         params$alpha,
-    "_robust-type_",   params$robust_type,
-    "_nw-lag_",        params$nw_lag,
-    "_Covid_m-",       params$covid_mask_m,
-    "_Covid_q-",       params$covid_mask_q,
-    "_",               format(params$start_est, "%Y-%m"),
-    "_to_",            format(params$end_eval, "%Y-%m"),
-    ".png"
-  )
-)
-
-# --- File nome per il plot EM ---
-file_graph_em <- file.path(
-  path_graph_country,
-  paste0(
-    "EM_Convergence_", country,
-    "_sel-",           params$sel_method,
-    "_Lproxy-",        Lproxy,
-    "_L_midas-",       L_midas,
-    "_Nm-",            N_m,
-    "_Nq-",            N_q,
-    "_p-AR",           params$p_AR,
-    "_Robust-F_",      params$Robust_F,
-    "_alpha-",         params$alpha,
-    "_robust-type_",   params$robust_type,
-    "_nw-lag_",        params$nw_lag,
-    "_Covid_m-",       params$covid_mask_m,
-    "_Covid_q-",       params$covid_mask_q,
-    "_",               format(params$start_est, "%Y-%m"),
-    "_to_",            format(params$end_eval, "%Y-%m"),
+    "MF_TPRF_FIT_",  country,
+    "_sel-",         params$sel_method,
+    "_Nm-",          N_m,
+    "_Nq-",          N_q,
+    "_Lproxy-",      Lproxy,
+    "_L_midas-",     L_midas,
+    "_p-AR",         p_ar,
+    "_Robust-F_",    params$Robust_F,
+    "_Covid_m-",     params$covid_mask_m,
+    "_Covid_q-",     params$covid_mask_q,
     ".png"
   )
 )
@@ -357,18 +301,8 @@ ggsave(
   dpi      = 300
 )
 
-# Salva EM CONVERGENCE
-ggsave(
-  filename = file_graph_em,
-  plot     = plot_em,
-  width    = 8,
-  height   = 5,
-  dpi      = 300
-)
-
 cat("*** GRAPHS SAVED TO ***\n",
-    file_graph_now, "\n",
-    file_graph_em,  "\n")
+    file_graph_now, "\n")
 
 
 
@@ -385,7 +319,8 @@ cat("*** GRAPHS SAVED TO ***\n",
 library(dplyr)
 library(ggplot2)
 
-path_country <- file.path(path_results, country)
+# path_country <- file.path(path_results, country)
+path_country <- file.path(path_results_vec, country)
 
 # file_realtime <- file.path(
 #  path_country,
@@ -395,17 +330,14 @@ path_country <- file.path(path_results, country)
 file_realtime <- file.path(
   path_country,
   paste0(
-    "MF3PRF_pseudoRT_", country,
+    "MF_TPRF_RT_",   country,
     "_sel-",         params$sel_method,
-    "_Lproxy-",      pseudo_realtime_raw$Lproxy_fix,     # !!! BISOGNA TROVARE UN MODO PER CHIAMARLO DAL PRINCIPIO
-    "_Lmidas-",      pseudo_realtime_raw$L_midas_fix,
     "_Nm-",          N_m,
     "_Nq-",          N_q,
-    "_p-AR",         params$p_AR,
+    "_Lproxy-",      pseudo_realtime_raw$hyper_pre$Lproxy,
+    "_Lmidas-",      pseudo_realtime_raw$hyper_pre$L_midas,
+    "_p-AR",         pseudo_realtime_raw$hyper_pre$p_AR,
     "_Robust-F_",    params$Robust_F,
-    "_alpha-",       params$alpha,
-    "_robust-type_", params$robust_type,
-    "_nw-lag_",      params$nw_lag,
     "_Covid_m-",     params$covid_mask_m,
     "_Covid_q-",     params$covid_mask_q,
     ".rds"
@@ -516,7 +448,7 @@ print(plot_rt)
 # 5. SAVE GRAPH TO COUNTRY FOLDER
 # ==============================================================================
 
-path_graph_country <- file.path(path_graph, country)
+path_graph_country <- file.path(path_graph_vec, country)
 if (!dir.exists(path_graph_country)) {
   dir.create(path_graph_country, recursive = TRUE)
 }
@@ -524,17 +456,14 @@ if (!dir.exists(path_graph_country)) {
 file_graph <- file.path(
   path_graph_country,
   paste0(
-    "MF3PRF_RollingPseudoRT_M1M2M3_", country,
+    "MF_TPRF_now_",   country,
     "_sel-",         params$sel_method,
-    "_Lproxy-",      pseudo_realtime_raw$Lproxy_fix,
-    "_Lmidas-",      pseudo_realtime_raw$L_midas_fix,
     "_Nm-",          N_m,
     "_Nq-",          N_q,
-    "_p-AR",         params$p_AR,
+    "_Lproxy-",      pseudo_realtime_raw$hyper_pre$Lproxy,
+    "_Lmidas-",      pseudo_realtime_raw$hyper_pre$L_midas,
+    "_p-AR",         pseudo_realtime_raw$hyper_pre$p_AR,
     "_Robust-F_",    params$Robust_F,
-    "_alpha-",       params$alpha,
-    "_robust-type_", params$robust_type,
-    "_nw-lag_",      params$nw_lag,
     "_Covid_m-",     params$covid_mask_m,
     "_Covid_q-",     params$covid_mask_q,
     ".png"
