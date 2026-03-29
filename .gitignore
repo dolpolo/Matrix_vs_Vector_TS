@@ -5,20 +5,20 @@
 # Data
 code/data/
 
-# MF-TPRF
-code/Vector_FM/MF-TPRF/results/
+# Vector MF-TPRF
+code/TPRF_Models_EA/Vector_MF-TPRF/results/
 
-# Matrix MF-TPRF
-code/Matrix_FM/Matrix_MF-TPRF/results/
+# VECTORIZED MF-TPRF
+code/TPRF_Models_EA/VecTensor_MF-TPRF/results/
 
-# DFM
-code/Vector_FM/DFM/results/
+# Matrix_MF-TPRF
+code/TPRF_Models_EA/Matrix_MF-TPRF/results/
 
-# DMFM
-code/Matrix_FM/DMFM/results/
+# Final Results EA
+code/TPRF_Models_EA/Final_Tab_Graph/
 
 # Monte Carlo Simulation
-code/simulation/results/
+code/MonteCarlo_simulation/results/
 
 # =========================
 # old: ignore old files
