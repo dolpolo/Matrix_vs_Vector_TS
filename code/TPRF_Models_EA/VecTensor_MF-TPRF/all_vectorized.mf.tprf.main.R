@@ -59,7 +59,6 @@ conflict_prefer("filter", "dplyr", quiet = TRUE)
 source(file.path(path_func_mat, "matrix.mf.tprf.utils.R"))
 source(file.path(path_func_mat, "matrix.mf.tprf.prep.R"))
 
-
 # ==============================================================================
 # 3. LOCAL HELPERS
 # ==============================================================================
@@ -103,7 +102,7 @@ list_to_df_nowcast <- function(lst, tag) {
 params <- list(
   start_est    = as.Date("2000-04-01"),
   start_eval   = as.Date("2017-01-01"),
-  end_eval     = as.Date("2025-09-01"),
+  end_eval     = as.Date("2026-02-01"),
   covid_start  = as.Date("2020-03-01"),
   covid_end    = as.Date("2021-07-01"),
   covid_mask_m = TRUE,
@@ -112,8 +111,8 @@ params <- list(
   target_cc    = "EA",
   
   sel_method   = "corr",
-  n_m          = 30,
-  n_q          = 30,
+  n_m          = 20,
+  n_q          = 5,
   thr_m        = 0.10,
   thr_q        = 0.85,
   thr_F_test   = 0.01,
@@ -185,24 +184,21 @@ summary_all <- lapply(names(results_all), function(cc) {
   res <- results_all[[cc]]
   
   summarize_mf_tprf_country(
-    MF_TPRF_res = list(
-      MF_TPRF = res$full_sample$fit
-    ),
-    RT_res = list(
-      pseudo_realtime_all = res$pseudo_realtime$all
-    ),
-    country = cc,
-    dates_m = res$inputs$dates_m,
-    dates_q = res$inputs$dates_q,
-    y_q     = res$inputs$y_q,
-    params  = res$params
+    MF_TPRF_res = res$full_sample,
+    RT_res      = res$pseudo_realtime,
+    country     = cc,
+    dates_m     = res$inputs$dates_m,
+    dates_q     = res$inputs$dates_q,
+    y_q         = res$inputs$y_q,
+    params      = res$params
   )
 })
 names(summary_all) <- names(results_all)
 
 cross_out <- build_cross_country_outputs(
   summary_all = summary_all,
-  params      = params
+  params      = params,
+  model_label = "VEC-P MF-TPRF"
 )
 
 # ==============================================================================
@@ -308,6 +304,14 @@ saveRDS(
     params                 = params,
     countries              = names(results_all),
     tag_run                = tag_run,
+    
+    hyper_by_country       = lapply(summary_all, function(x) list(
+      full = x$hyper_full,
+      rt   = x$hyper_rt
+    )),
+    hyper_full_all         = cross_out$hyper_full_all,
+    hyper_rt_pre_all       = cross_out$hyper_rt_pre_all,
+    hyper_rt_post_all      = cross_out$hyper_rt_post_all,
     
     df_now_full_all        = cross_out$df_now_full_all,
     df_quarterly_all       = cross_out$df_quarterly_all,

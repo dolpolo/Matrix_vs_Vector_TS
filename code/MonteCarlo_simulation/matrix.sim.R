@@ -115,10 +115,10 @@ source(file.path(path_func_mat, "matrix.mf.tprf.now.R"))
 
 args <- commandArgs(trailingOnly = TRUE)
 
-Tm_in   <- if (length(args) >= 1) as.numeric(args[1]) else 402
-p1_in   <- if (length(args) >= 2) as.numeric(args[2]) else 10
-p2_in   <- if (length(args) >= 3) as.numeric(args[3]) else 100 
-rhoG_in <- if (length(args) >= 4) as.numeric(args[4]) else 0.3
+Tm_in   <- if (length(args) >= 1) as.numeric(args[1]) else 201
+p1_in   <- if (length(args) >= 2) as.numeric(args[2]) else 20
+p2_in   <- if (length(args) >= 3) as.numeric(args[3]) else 50 
+rhoG_in <- if (length(args) >= 4) as.numeric(args[4]) else 0.95
 rhoE_in <- if (length(args) >= 5) as.numeric(args[5]) else 0.9
 
 
@@ -211,7 +211,7 @@ if (!dir.exists(path_mc)) {
 # Build base filename
 # ------------------------------------------------------------------------------
 file_base <- paste0(
-  "MC_nowcast",
+  "PAPER_MC_nowcast",
   "_T",  dgp_params$Tm,
   "_p1", dgp_params$p1,
   "_p2", dgp_params$p2,

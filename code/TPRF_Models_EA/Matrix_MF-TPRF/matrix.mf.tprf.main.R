@@ -69,7 +69,7 @@ params <- list(
   # Sample
   start_est    = as.Date("2000-04-01"),
   start_eval   = as.Date("2017-01-01"),
-  end_eval     = as.Date("2025-09-01"),
+  end_eval     = as.Date("2026-02-01"),
   covid_start  = as.Date("2020-03-01"),
   covid_end    = as.Date("2021-07-01"),
   covid_mask_m = TRUE,
@@ -80,8 +80,8 @@ params <- list(
   target_cc = "EA",
   
   # Variable selection
-  sel_method  = "corr",      # "corr" | "corr_threshold" | "F-Test" | "LASSO"
-  n_m         = 35,
+  sel_method  = "LASSO",      # "corr" | "corr_threshold" | "F-Test" | "LASSO"
+  n_m         = 30,
   n_q         = 30,
   thr_m       = 0.10,
   thr_q       = 0.85,
@@ -127,8 +127,9 @@ tensor <- build_tensor(all_countries, params, var_scope = "union")
 Y <- tensor$Y
 W <- tensor$W
 
-nan_percent_Y(Y)
-
+na_pct            <- nan_percent_Y(Y)
+df_selection      <- selection_to_df(all_countries, params)
+df_selection_wide <- selection_to_wide(df_selection)
 # ==============================================================================
 # 5. TARGET, PREDICTORS, AND METADATA
 # ==============================================================================
@@ -283,8 +284,12 @@ saveRDS(
     Size     = Size,
     sel      = sel,
     
-    params    = params,
-    countries = countries,
+    params     = params,
+    countries  = countries,
+    na_pct     = na_pct,
+    selections = df_selection,
+    selections_wide = df_selection_wide,
+    sel_raw    = all_countries$sel,
     
     dates_m = dates_m,
     dates_q = dates_q,
@@ -389,11 +394,15 @@ file_rt <- build_result_filename(
 
 saveRDS(
   list(
-    model_id = "T_MF_TPRF",
-    model    = model_name,
-    stage    = "pseudo_realtime",
-    Size     = Size,
-    sel      = sel,
+    model_id   = "T_MF_TPRF",
+    model      = model_name,
+    stage      = "pseudo_realtime",
+    Size       = Size,
+    sel        = sel,
+    na_pct     = na_pct,
+    selections = df_selection,
+    selections_wide = df_selection_wide,
+    sel_raw    = all_countries$sel,
     
     params      = params,
     proxy_name  = "EA",

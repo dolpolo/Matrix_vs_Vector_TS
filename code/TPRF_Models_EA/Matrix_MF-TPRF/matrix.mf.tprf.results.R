@@ -19,6 +19,7 @@ library(ggplot2)
 library(lubridate)
 
 path_main     <- "C:/Users/david/Desktop/Paper/Matrix_vs_Vector_TS/code"
+file_out      <- file.path(path_main, "TPRF_Models_EA/Final_Tab_Graph")
 path_results  <- file.path(path_main, "TPRF_Models_EA/Matrix_MF-TPRF/results/outputs")
 path_graph    <- file.path(path_main, "TPRF_Models_EA/Matrix_MF-TPRF/results/graph_tensor")
 path_graph_rt <- file.path(path_main, "TPRF_Models_EA/Matrix_MF-TPRF/results/graph_tensor_RT")
@@ -36,7 +37,7 @@ dir.create(path_graph_rt, recursive = TRUE, showWarnings = FALSE)
 # Tags of the run you want to analyze
 model_name <- "matrix"
 Size       <- "large"   # "small" | "medium" | "large"
-sel        <- "corr"    # "corr" | "LASSO"
+sel        <- "LASSO"    # "corr" | "LASSO"
 
 file_fit <- find_result_file(
   path  = path_results,
@@ -71,6 +72,11 @@ sel        <- if (!is.null(res_fit$sel))   res_fit$sel   else sel
 
 params <- res_fit$params
 tensor <- res_fit$tensor
+
+df_selection <- res_fit$selections
+df_selection_wide <- res_fit$selections_wide
+sel_raw <- res_fit$sel_raw
+na_pct <- res_fit$na_pct
 
 fit_obj <- if (!is.null(res_fit$fit)) {
   res_fit$fit
@@ -285,6 +291,16 @@ latex_tab_insample <- list_to_latex_table(
 
 cat("\n", latex_tab_insample, "\n")
 
+dir.create(file_out, recursive = TRUE, showWarnings = FALSE)
+
+latex_selection <- save_selection_wide_to_latex(
+  df_selection_wide = df_selection_wide,
+  file    = file.path(file_out, "selection_wide_table.tex"),
+  caption = "Country-specific variable selection",
+  label   = "tab:selection_wide"
+)
+
+cat(latex_selection)
 # ==============================================================================
 # 9. SAVE FULL-SAMPLE GRAPH
 # ==============================================================================
@@ -515,6 +531,12 @@ tab_rt_all <- rmsfe_rt_wide %>%
   ) %>%
   select(country, period, M1, M2, M3)
 
+hyper_summary <- if (!is.null(res_rt$hyper)) {
+  res_rt$hyper
+} else {
+  list(pre = NULL, post = NULL)
+}
+
 summary_tensor_out <- list(
   model_id               = "T_MF_TPRF",
   model                  = model_name,
@@ -522,6 +544,8 @@ summary_tensor_out <- list(
   Size                   = Size,
   sel                    = sel,
   params                 = params_rt,
+  
+  hyper = hyper_summary,
   
   countries              = countries_eval_rt,
   
@@ -536,6 +560,11 @@ summary_tensor_out <- list(
   plot_rt_facet          = plot_rt,
   tab_rt_all             = tab_rt_all,
   latex_tab_rt_all       = latex_tab_rt,
+  
+  selection_details = df_selection,
+  selection_wide    = df_selection_wide,
+  selection_raw     = sel_raw,
+  na_pct            = na_pct,
   
   file_fit               = file_fit,
   file_rt                = file_rt,

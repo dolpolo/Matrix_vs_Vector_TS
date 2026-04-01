@@ -1071,3 +1071,58 @@ nan_percent_Y <- function(Y) {
   percent <- total_NAs / total_values * 100
   return(percent)
 }
+
+# ==============================================================================
+# VARIABLES SELECTED BY COUNTRY
+# ==============================================================================
+
+selection_to_df <- function(all_countries, params) {
+  
+  size_tag <- get_size_tag(params$n_m, params$n_q)
+  countries <- names(all_countries$sel$m)
+  
+  df_m <- bind_rows(lapply(countries, function(cc) {
+    vars <- all_countries$sel$m[[cc]]
+    if (length(vars) == 0) return(NULL)
+    
+    data.frame(
+      country    = cc,
+      variable   = vars,
+      base_name  = sub(paste0("_", cc, "$"), "", vars),
+      frequency  = "M",
+      selected   = 1,
+      model_size = size_tag,
+      stringsAsFactors = FALSE
+    )
+  }))
+  
+  df_q <- bind_rows(lapply(countries, function(cc) {
+    vars <- all_countries$sel$q[[cc]]
+    if (length(vars) == 0) return(NULL)
+    
+    data.frame(
+      country    = cc,
+      variable   = vars,
+      base_name  = sub(paste0("_", cc, "$"), "", vars),
+      frequency  = "Q",
+      selected   = 1,
+      model_size = size_tag,
+      stringsAsFactors = FALSE
+    )
+  }))
+  
+  bind_rows(df_m, df_q) %>%
+    arrange(frequency, base_name, country)
+}
+
+selection_to_wide <- function(df_selection) {
+  df_selection %>%
+    select(country, base_name, frequency, model_size, selected) %>%
+    distinct() %>%
+    tidyr::pivot_wider(
+      names_from  = country,
+      values_from = selected,
+      values_fill = 0
+    ) %>%
+    arrange(frequency, base_name)
+}

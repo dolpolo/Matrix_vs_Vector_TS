@@ -25,7 +25,7 @@ library(lubridate)
 
 path_main <- "C:/Users/david/Desktop/Paper/Matrix_vs_Vector_TS/code"
 
-path_final_results <- file.path(path_main, "Final_Tab_Graph")
+path_final_results <- file.path(path_main, "TPRF_Models_EA/Final_Tab_Graph")
 dir.create(path_final_results, recursive = TRUE, showWarnings = FALSE)
 
 path_matrix_results <- file.path(path_main, "TPRF_Models_EA/Matrix_MF-TPRF/results/outputs")
@@ -245,8 +245,23 @@ cat("\n================ RELATIVE ROLLING ================\n")
 print(rel_rt)
 cat("\n", latex_rel_rt, "\n")
 
+
 # ==============================================================================
-# 9. SAVE FINAL OUTPUTS
+# 9. FINAL LATEX TABLE
+# ==============================================================================
+
+latex_final_custom <- build_final_large_style_latex(
+  summary_matrix    = summary_matrix,
+  summary_vector    = summary_vector,
+  summary_vectensor = summary_vectensor,
+  Size              = Size,
+  sel               = sel
+)
+
+cat(latex_final_custom)
+
+# ==============================================================================
+# 10. SAVE FINAL OUTPUTS
 # ==============================================================================
 
 suffix_out <- paste0("Size-", Size, "_sel-", sel)
@@ -294,6 +309,11 @@ writeLines(
 writeLines(
   latex_rel_rt,
   file.path(path_final_results, paste0("relative_rt_", suffix_out, ".tex"))
+)
+
+writeLines(
+  latex_final_custom,
+  file.path(path_final_results, paste0("final_custom_table_", suffix_out, ".tex"))
 )
 
 saveRDS(

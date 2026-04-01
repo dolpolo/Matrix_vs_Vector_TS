@@ -1,12 +1,13 @@
 # ==============================================================================
 # MF-TPRF Cross-Country Utilities
 # ------------------------------------------------------------------------------
-# This file provides:
-#   1. Country-level input preparation
-#   2. Full-sample estimation helpers
-#   3. Pseudo real-time helpers
-#   4. Country and cross-country wrappers
-#   5. Summary objects for plots, RMSFE, and comparisons
+# Corrected version:
+#   1. full-sample estimation aligned to available quarterly target
+#   2. pseudo real-time rolling stops country-by-country at last available month
+#   3. RMSFE evaluation stops country-by-country at last available target quarter
+#   4. corrected RT summary extraction: RT_res$all
+#   5. full-sample and rolling hyperparameters propagated to country summaries
+#   6. cross-country hyperparameter tables added to cross-country outputs
 # ==============================================================================
 
 # ==============================================================================
@@ -37,6 +38,22 @@ rmsfe_period <- function(mask_q, y_true_q, y_now_in, M_idx) {
   sqrt(mean((y_true_sub - y_now_sub)^2, na.rm = TRUE))
 }
 
+get_country_eval_windows <- function(country_inputs, params) {
+  
+  last_y_date <- max(country_inputs$dates_q, na.rm = TRUE)
+  last_m_date <- max(country_inputs$dates_m, na.rm = TRUE)
+  
+  end_eval_rmsfe <- min(params$end_eval, last_y_date)
+  end_eval_rt    <- min(params$end_eval, last_m_date)
+  
+  list(
+    last_y_date    = last_y_date,
+    last_m_date    = last_m_date,
+    end_eval_rmsfe = end_eval_rmsfe,
+    end_eval_rt    = end_eval_rt
+  )
+}
+
 # ==============================================================================
 # 1. COUNTRY INPUT PREPARATION
 # ==============================================================================
@@ -46,16 +63,25 @@ prepare_country_inputs <- function(all_countries, country, params) {
   country_data <- all_countries$data[[country]]
   
   data    <- country_data$Data
-  dates_m <- country_data$Dates
-  dates_q <- country_data$DatesQ
+  dates_m <- as.Date(country_data$Dates)
   series  <- country_data$Series
   
   gdp_col     <- country_data$target_col
   target_name <- paste0(params$target, "_", country)
   
-  y   <- as.matrix(data[, gdp_col, drop = FALSE])
-  y_q <- as.numeric(y[!is.na(y)])
-  X   <- as.matrix(data[, -gdp_col, drop = FALSE])
+  # ---------------------------------------------------------------------------
+  # Target
+  # ---------------------------------------------------------------------------
+  y <- as.matrix(data[, gdp_col, drop = FALSE])
+  
+  y_obs_idx <- which(!is.na(y[, 1]))
+  y_q       <- as.numeric(y[y_obs_idx, 1])
+  dates_q   <- dates_m[y_obs_idx]
+  
+  # ---------------------------------------------------------------------------
+  # Predictors
+  # ---------------------------------------------------------------------------
+  X <- as.matrix(data[, -gdp_col, drop = FALSE])
   
   N_m <- country_data$nM
   
@@ -86,6 +112,7 @@ prepare_country_inputs <- function(all_countries, country, params) {
     target_name  = target_name,
     X            = X,
     y_q          = y_q,
+    y_obs_idx    = y_obs_idx,
     dates_m      = dates_m,
     dates_q      = dates_q,
     series_names = series,
@@ -111,20 +138,27 @@ prepare_country_inputs_from_tensor_vectorized <- function(tensor, data, country,
     stop("Target column not found uniquely for country: ", country)
   }
   
-  y   <- as.matrix(data[, gdp_col, drop = FALSE])
-  y_q <- as.numeric(y[!is.na(y[, 1])])
+  # ---------------------------------------------------------------------------
+  # Target
+  # ---------------------------------------------------------------------------
+  y <- as.matrix(data[, gdp_col, drop = FALSE])
   
+  dates_m   <- as.Date(dimnames(tensor$Y)[[1]])
+  y_obs_idx <- which(!is.na(y[, 1]))
+  y_q       <- as.numeric(y[y_obs_idx, 1])
+  dates_q   <- dates_m[y_obs_idx]
+  
+  # ---------------------------------------------------------------------------
+  # Predictors
+  # ---------------------------------------------------------------------------
   X_vec <- as.matrix(data[, -gdp_col, drop = FALSE])
   predictor_names <- colnames(X_vec)
-  
-  dates_m <- as.Date(dimnames(tensor$Y)[[1]])
-  dates_q <- dates_m[!is.na(y[, 1])]
   
   get_varname <- function(x) sub("^[^_]+_", "", x)
   predictor_var <- get_varname(predictor_names)
   
   keep <- predictor_var != params$target
-  X_vec          <- X_vec[, keep, drop = FALSE]
+  X_vec           <- X_vec[, keep, drop = FALSE]
   predictor_names <- predictor_names[keep]
   predictor_var   <- predictor_var[keep]
   
@@ -189,6 +223,7 @@ prepare_country_inputs_from_tensor_vectorized <- function(tensor, data, country,
     target_name  = target_name,
     X            = X_vec,
     y_q          = y_q,
+    y_obs_idx    = y_obs_idx,
     dates_m      = dates_m,
     dates_q      = dates_q,
     series_names = predictor_names,
@@ -228,8 +263,22 @@ estimate_country_mf_tprf <- function(country_inputs, params) {
   X_qq_xp  <- agg_qq(X_q_xp, country_inputs$agg_q)
   X_xp_agg <- cbind(X_mq_xp, X_qq_xp)
   
+  # align low-frequency regressors to observed quarterly target
+  n_q_y <- length(y_q)
+  
+  if (n_q_y > nrow(X_xp_agg)) {
+    stop(
+      "Observed quarterly target length exceeds aggregated regressor rows for country ",
+      country_inputs$country,
+      ". length(y_q) = ", n_q_y,
+      ", nrow(X_xp_agg) = ", nrow(X_xp_agg)
+    )
+  }
+  
+  X_xp_agg_est <- X_xp_agg[seq_len(n_q_y), , drop = FALSE]
+  
   pls_object <- select_L_autoproxy_3prf(
-    X_xp_agg,
+    X_xp_agg_est,
     y_q,
     Zmax = params$Zmax
   )
@@ -237,7 +286,7 @@ estimate_country_mf_tprf <- function(country_inputs, params) {
   Lproxy <- pls_object$L_opt
   
   lag_sel <- choose_UMIDAS_lag(
-    X_lf        = X_xp_agg,
+    X_lf        = X_xp_agg_est,
     X_hf        = X_xp,
     y_q         = y_q,
     Lmax        = params$Lmax,
@@ -253,7 +302,7 @@ estimate_country_mf_tprf <- function(country_inputs, params) {
   p_ar    <- lag_sel$best_BIC$p_AR
   
   fit <- MF_TPRF(
-    X_lf        = X_xp_agg,
+    X_lf        = X_xp_agg_est,
     X_hf        = X_xp,
     y_q         = y_q,
     Lproxy      = Lproxy,
@@ -267,12 +316,13 @@ estimate_country_mf_tprf <- function(country_inputs, params) {
   
   list(
     preprocessing = list(
-      out_std  = out_std,
-      imp_xp   = imp_xp,
-      X_xp     = X_xp,
-      X_mq_xp  = X_mq_xp,
-      X_qq_xp  = X_qq_xp,
-      X_xp_agg = X_xp_agg
+      out_std      = out_std,
+      imp_xp       = imp_xp,
+      X_xp         = X_xp,
+      X_mq_xp      = X_mq_xp,
+      X_qq_xp      = X_qq_xp,
+      X_xp_agg     = X_xp_agg,
+      X_xp_agg_est = X_xp_agg_est
     ),
     hyper = list(
       r_hat   = r_hat,
@@ -328,13 +378,25 @@ run_country_mf_tprf_rt <- function(country_inputs, params) {
 
 run_country_mf_tprf <- function(country_inputs, params, path_results = NULL) {
   
-  est <- estimate_country_mf_tprf(country_inputs, params)
-  rt  <- run_country_mf_tprf_rt(country_inputs, params)
+  win <- get_country_eval_windows(country_inputs, params)
+  
+  params_cc <- params
+  params_cc$last_y_date    <- win$last_y_date
+  params_cc$last_m_date    <- win$last_m_date
+  params_cc$end_eval_rmsfe <- win$end_eval_rmsfe
+  params_cc$end_eval_rt    <- win$end_eval_rt
+  
+  # RT loop should stop at country-specific last available monthly date
+  params_rt <- params_cc
+  params_rt$end_eval <- params_cc$end_eval_rt
+  
+  est <- estimate_country_mf_tprf(country_inputs, params_cc)
+  rt  <- run_country_mf_tprf_rt(country_inputs, params_rt)
   
   out <- list(
     model_id = "MF_TPRF",
     country  = country_inputs$country,
-    params   = params,
+    params   = params_cc,
     inputs   = country_inputs,
     full_sample     = est,
     pseudo_realtime = rt
@@ -430,7 +492,25 @@ summarize_mf_tprf_country <- function(
   # ---------------------------------------------------------------------------
   # A. FULL-SAMPLE NOWCAST OBJECTS
   # ---------------------------------------------------------------------------
-  y_now_full   <- MF_TPRF_res$MF_TPRF$y_nowcast
+  fit_obj <- if (!is.null(MF_TPRF_res$fit)) {
+    MF_TPRF_res$fit
+  } else if (!is.null(MF_TPRF_res$MF_TPRF)) {
+    MF_TPRF_res$MF_TPRF
+  } else {
+    stop("No valid full-sample fit object found in MF_TPRF_res.")
+  }
+  
+  hyper_full <- if (!is.null(MF_TPRF_res$hyper)) MF_TPRF_res$hyper else NULL
+  
+  hyper_rt <- NULL
+  if (!is.null(RT_res) && !is.null(RT_res$raw)) {
+    hyper_rt <- list(
+      pre  = RT_res$raw$hyper_pre,
+      post = RT_res$raw$hyper_post
+    )
+  }
+  
+  y_now_full   <- fit_obj$y_nowcast
   T_m_full     <- length(y_now_full)
   T_q_complete <- length(y_q)
   
@@ -500,7 +580,7 @@ summarize_mf_tprf_country <- function(
   # B. IN-SAMPLE RMSFE
   # ---------------------------------------------------------------------------
   start_eval  <- params$start_eval
-  end_eval    <- params$end_eval
+  end_eval    <- if (!is.null(params$end_eval_rmsfe)) params$end_eval_rmsfe else params$end_eval
   covid_start <- params$covid_start
   covid_end   <- params$covid_end
   
@@ -570,9 +650,9 @@ summarize_mf_tprf_country <- function(
   rmsfe_mat_rt <- NULL
   latex_rt <- NULL
   
-  if (!is.null(RT_res)) {
+  if (!is.null(RT_res) && !is.null(RT_res$all)) {
     
-    df_rt <- RT_res$pseudo_realtime_all %>%
+    df_rt <- RT_res$all %>%
       dplyr::rename(
         type = month_in_quarter,
         nowcast = nowcast,
@@ -582,7 +662,9 @@ summarize_mf_tprf_country <- function(
     
     df_rt$type <- factor(df_rt$type, levels = c("M1", "M2", "M3"))
     
-    idx_eval <- which(dates_q >= params$start_eval & dates_q <= params$end_eval)
+    end_eval_score <- if (!is.null(params$end_eval_rmsfe)) params$end_eval_rmsfe else params$end_eval
+    
+    idx_eval <- which(dates_q >= params$start_eval & dates_q <= end_eval_score)
     df_yq_eval <- data.frame(
       date = dates_q[idx_eval],
       GDP  = y_q[idx_eval]
@@ -674,9 +756,11 @@ summarize_mf_tprf_country <- function(
     rmsfe_all <- dplyr::bind_rows(rmsfe_full, rmsfe_by_period) %>%
       dplyr::filter(period %in% c("Full sample", "Pre-COVID", "COVID period", "Post-COVID")) %>%
       dplyr::mutate(
-        period = factor(period,
-                        levels = c("Full sample", "Pre-COVID", "COVID period", "Post-COVID")),
-        type   = factor(type, levels = c("M1", "M2", "M3"))
+        period = factor(
+          period,
+          levels = c("Full sample", "Pre-COVID", "COVID period", "Post-COVID")
+        ),
+        type = factor(type, levels = c("M1", "M2", "M3"))
       ) %>%
       dplyr::arrange(period, type)
     
@@ -712,6 +796,8 @@ summarize_mf_tprf_country <- function(
   list(
     model_id        = model_id,
     country         = country,
+    hyper_full      = hyper_full,
+    hyper_rt        = hyper_rt,
     df_now_full     = df_now_full,
     df_quarterly    = df_quarterly,
     plot_nowcast    = plot_nowcast,
@@ -728,7 +814,8 @@ summarize_mf_tprf_country <- function(
 # ==============================================================================
 # 7. CROSS-COUNTRY OUTPUTS
 # ==============================================================================
-build_cross_country_outputs <- function(summary_all, params) {
+
+build_cross_country_outputs <- function(summary_all, params, model_label = "MF-TPRF") {
   
   df_now_full_all <- dplyr::bind_rows(
     lapply(names(summary_all), function(cc) {
@@ -750,8 +837,12 @@ build_cross_country_outputs <- function(summary_all, params) {
   
   country_order <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
   
-  df_now_full_all$country  <- factor(df_now_full_all$country,  levels = country_order)
-  df_quarterly_all$country <- factor(df_quarterly_all$country, levels = country_order)
+  if (!is.null(df_now_full_all) && nrow(df_now_full_all) > 0) {
+    df_now_full_all$country <- factor(df_now_full_all$country, levels = country_order)
+  }
+  if (!is.null(df_quarterly_all) && nrow(df_quarterly_all) > 0) {
+    df_quarterly_all$country <- factor(df_quarterly_all$country, levels = country_order)
+  }
   
   plot_nowcast_facet <- ggplot2::ggplot() +
     ggplot2::annotate(
@@ -785,7 +876,7 @@ build_cross_country_outputs <- function(summary_all, params) {
     ) +
     ggplot2::facet_wrap(~ country, ncol = 2, scales = "free_y") +
     ggplot2::labs(
-      title = "MF-TPRF Monthly Nowcast (In-Sample + Real-Time)",
+      title = paste0(model_label, " Monthly Nowcast (In-Sample + Real-Time)"),
       x = "Date",
       y = "GDP Growth"
     ) +
@@ -845,8 +936,12 @@ build_cross_country_outputs <- function(summary_all, params) {
     })
   )
   
-  df_rt_all$country      <- factor(df_rt_all$country,      levels = country_order)
-  df_yq_eval_all$country <- factor(df_yq_eval_all$country, levels = country_order)
+  if (!is.null(df_rt_all) && nrow(df_rt_all) > 0) {
+    df_rt_all$country <- factor(df_rt_all$country, levels = country_order)
+  }
+  if (!is.null(df_yq_eval_all) && nrow(df_yq_eval_all) > 0) {
+    df_yq_eval_all$country <- factor(df_yq_eval_all$country, levels = country_order)
+  }
   
   plot_rt_facet <- ggplot2::ggplot() +
     ggplot2::annotate(
@@ -881,7 +976,7 @@ build_cross_country_outputs <- function(summary_all, params) {
     ) +
     ggplot2::facet_wrap(~ country, ncol = 2, scales = "free_y") +
     ggplot2::labs(
-      title = "MF-TPRF Rolling Real-Time Nowcasts",
+      title = paste0(model_label, " Rolling Real-Time Nowcasts"),
       subtitle = "M1: early • M2: mid-quarter • M3: end-quarter",
       x = "Date",
       y = "GDP Growth Rate"
@@ -929,7 +1024,55 @@ build_cross_country_outputs <- function(summary_all, params) {
     "\\end{table}\n"
   )
   
+  hyper_full_all <- do.call(rbind, lapply(names(summary_all), function(cc) {
+    hp <- summary_all[[cc]]$hyper_full
+    if (is.null(hp)) return(NULL)
+    
+    data.frame(
+      country = cc,
+      r_hat   = paste(hp$r_hat, collapse = ","),
+      Lproxy  = hp$Lproxy,
+      L_midas = hp$L_midas,
+      p_ar    = hp$p_ar,
+      row.names = NULL
+    )
+  }))
+  
+  hyper_rt_pre_all <- do.call(rbind, lapply(names(summary_all), function(cc) {
+    hp_cc <- summary_all[[cc]]$hyper_rt
+    if (is.null(hp_cc) || is.null(hp_cc$pre)) return(NULL)
+    hp <- hp_cc$pre
+    
+    data.frame(
+      country = cc,
+      Lproxy  = hp$Lproxy,
+      L_midas = hp$L_midas,
+      p_AR    = hp$p_AR,
+      r       = hp$r,
+      row.names = NULL
+    )
+  }))
+  
+  hyper_rt_post_all <- do.call(rbind, lapply(names(summary_all), function(cc) {
+    hp_cc <- summary_all[[cc]]$hyper_rt
+    if (is.null(hp_cc) || is.null(hp_cc$post)) return(NULL)
+    hp <- hp_cc$post
+    
+    data.frame(
+      country   = cc,
+      Lproxy    = hp$Lproxy,
+      L_midas   = hp$L_midas,
+      p_AR      = hp$p_AR,
+      r         = hp$r,
+      t_recalib = if (!is.null(hp$t_recalib)) as.character(hp$t_recalib) else NA_character_,
+      row.names = NULL
+    )
+  }))
+  
   list(
+    hyper_full_all         = hyper_full_all,
+    hyper_rt_pre_all       = hyper_rt_pre_all,
+    hyper_rt_post_all      = hyper_rt_post_all,
     df_now_full_all        = df_now_full_all,
     df_quarterly_all       = df_quarterly_all,
     plot_nowcast_facet     = plot_nowcast_facet,
@@ -942,7 +1085,6 @@ build_cross_country_outputs <- function(summary_all, params) {
     latex_tab_rt_all       = latex_tab_rt_all
   )
 }
-
 
 # ==============================================================================
 # 8. MODEL COMPARISON HELPERS
