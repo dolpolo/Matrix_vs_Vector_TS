@@ -34,6 +34,7 @@ literature/*
 # Ignora tutto sotto LaTeX/
 LaTeX/*
 LaTeX_TPRF/*
+LaTeX_slides_TPRF/*
 # ...ma NON ignorare la cartella output
 # !LaTeX/output/
 
