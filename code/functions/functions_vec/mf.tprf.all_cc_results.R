@@ -8,6 +8,13 @@
 #   4. corrected RT summary extraction: RT_res$all
 #   5. full-sample and rolling hyperparameters propagated to country summaries
 #   6. cross-country hyperparameter tables added to cross-country outputs
+#   7. real-time plot variants added:
+#        - total
+#        - big 4
+#        - other 4
+#        - post-COVID
+#        - country-by-country
+#   8. automatic saving utilities for RT plot variants
 # ==============================================================================
 
 # ==============================================================================
@@ -263,7 +270,6 @@ estimate_country_mf_tprf <- function(country_inputs, params) {
   X_qq_xp  <- agg_qq(X_q_xp, country_inputs$agg_q)
   X_xp_agg <- cbind(X_mq_xp, X_qq_xp)
   
-  # align low-frequency regressors to observed quarterly target
   n_q_y <- length(y_q)
   
   if (n_q_y > nrow(X_xp_agg)) {
@@ -386,7 +392,6 @@ run_country_mf_tprf <- function(country_inputs, params, path_results = NULL) {
   params_cc$end_eval_rmsfe <- win$end_eval_rmsfe
   params_cc$end_eval_rt    <- win$end_eval_rt
   
-  # RT loop should stop at country-specific last available monthly date
   params_rt <- params_cc
   params_rt$end_eval <- params_cc$end_eval_rt
   
@@ -394,10 +399,10 @@ run_country_mf_tprf <- function(country_inputs, params, path_results = NULL) {
   rt  <- run_country_mf_tprf_rt(country_inputs, params_rt)
   
   out <- list(
-    model_id = "MF_TPRF",
-    country  = country_inputs$country,
-    params   = params_cc,
-    inputs   = country_inputs,
+    model_id        = "MF_TPRF",
+    country         = country_inputs$country,
+    params          = params_cc,
+    inputs          = country_inputs,
     full_sample     = est,
     pseudo_realtime = rt
   )
@@ -539,6 +544,12 @@ summarize_mf_tprf_country <- function(
     y_true = as.numeric(y_q)
   )
   
+  year_breaks_full <- seq(
+    lubridate::floor_date(min(df_now_full$date, na.rm = TRUE), unit = "year"),
+    lubridate::floor_date(max(df_now_full$date, na.rm = TRUE), unit = "year"),
+    by = "1 year"
+  )
+  
   plot_nowcast <- ggplot2::ggplot() +
     ggplot2::annotate(
       "rect",
@@ -569,12 +580,23 @@ summarize_mf_tprf_country <- function(
       ),
       name = ""
     ) +
-    ggplot2::labs(
-      title = paste0("MF-TPRF Monthly Nowcast (In-Sample + Real-Time) - ", country),
-      x = "Date",
-      y = "GDP Growth"
+    ggplot2::scale_x_date(
+      breaks = year_breaks_full,
+      date_labels = "%Y",
+      expand = ggplot2::expansion(mult = c(0.01, 0.02))
     ) +
-    ggplot2::theme_minimal(base_size = 14)
+    ggplot2::labs(
+      title = "Monthly nowcasts and observed GDP",
+      subtitle = NULL,
+      x = "Date",
+      y = "GDP growth"
+    ) +
+    ggplot2::theme_minimal(base_size = 14) +
+    ggplot2::theme(
+      axis.text.x   = ggplot2::element_text(angle = 45, hjust = 1),
+      plot.title    = ggplot2::element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = ggplot2::element_text(hjust = 0.5, colour = "grey25")
+    )
   
   # ---------------------------------------------------------------------------
   # B. IN-SAMPLE RMSFE
@@ -670,6 +692,12 @@ summarize_mf_tprf_country <- function(
       GDP  = y_q[idx_eval]
     )
     
+    year_breaks_rt <- seq(
+      lubridate::floor_date(min(df_rt$date, na.rm = TRUE), unit = "year"),
+      lubridate::floor_date(max(df_rt$date, na.rm = TRUE), unit = "year"),
+      by = "1 year"
+    )
+    
     plot_rt <- ggplot2::ggplot() +
       ggplot2::annotate(
         "rect",
@@ -701,18 +729,24 @@ summarize_mf_tprf_country <- function(
         ),
         name = "Series"
       ) +
+      ggplot2::scale_x_date(
+        breaks = year_breaks_rt,
+        date_labels = "%Y",
+        expand = ggplot2::expansion(mult = c(0.01, 0.02))
+      ) +
       ggplot2::labs(
-        title    = paste0("MF-TPRF Rolling Real-Time Nowcasts - ", country),
-        subtitle = "M1: early • M2: mid-quarter • M3: end-quarter",
+        title    = paste("Rolling real-time nowcasts:", country),
+        subtitle = NULL,
         x        = "Date",
-        y        = "GDP Growth Rate"
+        y        = "GDP growth"
       ) +
       ggplot2::theme_minimal(base_size = 15) +
       ggplot2::theme(
         legend.position  = "bottom",
-        plot.title       = ggplot2::element_text(face = "bold"),
-        plot.subtitle    = ggplot2::element_text(color = "gray30"),
-        panel.grid.minor = ggplot2::element_blank()
+        plot.title       = ggplot2::element_text(face = "bold", hjust = 0.5),
+        plot.subtitle    = ggplot2::element_text(color = "gray30", hjust = 0.5),
+        panel.grid.minor = ggplot2::element_blank(),
+        axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1)
       )
     
     df_yq_eval <- df_yq_eval %>%
@@ -844,6 +878,12 @@ build_cross_country_outputs <- function(summary_all, params, model_label = "MF-T
     df_quarterly_all$country <- factor(df_quarterly_all$country, levels = country_order)
   }
   
+  year_breaks_full_all <- seq(
+    lubridate::floor_date(min(df_now_full_all$date, na.rm = TRUE), unit = "year"),
+    lubridate::floor_date(max(df_now_full_all$date, na.rm = TRUE), unit = "year"),
+    by = "1 year"
+  )
+  
   plot_nowcast_facet <- ggplot2::ggplot() +
     ggplot2::annotate(
       "rect",
@@ -874,13 +914,24 @@ build_cross_country_outputs <- function(summary_all, params, model_label = "MF-T
       ),
       name = ""
     ) +
+    ggplot2::scale_x_date(
+      breaks = year_breaks_full_all,
+      date_labels = "%Y",
+      expand = ggplot2::expansion(mult = c(0.01, 0.02))
+    ) +
     ggplot2::facet_wrap(~ country, ncol = 2, scales = "free_y") +
     ggplot2::labs(
-      title = paste0(model_label, " Monthly Nowcast (In-Sample + Real-Time)"),
+      title = "Monthly nowcasts and observed GDP",
+      subtitle = NULL,
       x = "Date",
-      y = "GDP Growth"
+      y = "GDP growth"
     ) +
-    ggplot2::theme_minimal(base_size = 13)
+    ggplot2::theme_minimal(base_size = 13) +
+    ggplot2::theme(
+      axis.text.x   = ggplot2::element_text(angle = 45, hjust = 1),
+      plot.title    = ggplot2::element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = ggplot2::element_text(hjust = 0.5, colour = "grey25")
+    )
   
   tab_insample_all <- do.call(rbind, lapply(names(summary_all), function(cc) {
     mat <- summary_all[[cc]]$rmsfe_insample
@@ -943,6 +994,12 @@ build_cross_country_outputs <- function(summary_all, params, model_label = "MF-T
     df_yq_eval_all$country <- factor(df_yq_eval_all$country, levels = country_order)
   }
   
+  year_breaks_rt_all <- seq(
+    lubridate::floor_date(min(df_rt_all$date, na.rm = TRUE), unit = "year"),
+    lubridate::floor_date(max(df_rt_all$date, na.rm = TRUE), unit = "year"),
+    by = "1 year"
+  )
+  
   plot_rt_facet <- ggplot2::ggplot() +
     ggplot2::annotate(
       "rect",
@@ -974,17 +1031,25 @@ build_cross_country_outputs <- function(summary_all, params, model_label = "MF-T
       ),
       name = "Series"
     ) +
+    ggplot2::scale_x_date(
+      breaks = year_breaks_rt_all,
+      date_labels = "%Y",
+      expand = ggplot2::expansion(mult = c(0.01, 0.02))
+    ) +
     ggplot2::facet_wrap(~ country, ncol = 2, scales = "free_y") +
     ggplot2::labs(
-      title = paste0(model_label, " Rolling Real-Time Nowcasts"),
-      subtitle = "M1: early • M2: mid-quarter • M3: end-quarter",
+      title = "Rolling real-time nowcasts",
+      subtitle = "Quarterly targets and monthly nowcast updates",
       x = "Date",
-      y = "GDP Growth Rate"
+      y = "GDP growth"
     ) +
     ggplot2::theme_minimal(base_size = 13) +
     ggplot2::theme(
-      legend.position = "bottom",
-      panel.grid.minor = ggplot2::element_blank()
+      legend.position  = "bottom",
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1),
+      plot.title       = ggplot2::element_text(face = "bold", hjust = 0.5),
+      plot.subtitle    = ggplot2::element_text(hjust = 0.5, colour = "grey25")
     )
   
   tab_rt_all <- do.call(rbind, lapply(names(summary_all), function(cc) {
@@ -1083,6 +1148,299 @@ build_cross_country_outputs <- function(summary_all, params, model_label = "MF-T
     plot_rt_facet          = plot_rt_facet,
     tab_rt_all             = tab_rt_all,
     latex_tab_rt_all       = latex_tab_rt_all
+  )
+}
+
+# ==============================================================================
+# 7B. REAL-TIME PLOT VARIANTS
+# ==============================================================================
+
+build_rt_plot_variants <- function(
+    df_rt_all,
+    df_yq_eval_all,
+    params,
+    model_label = "MF-TPRF",
+    country_order = c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
+) {
+  
+  df_rt_all <- df_rt_all %>%
+    dplyr::mutate(country = factor(as.character(country), levels = country_order))
+  
+  df_yq_eval_all <- df_yq_eval_all %>%
+    dplyr::mutate(country = factor(as.character(country), levels = country_order))
+  
+  make_rt_plot <- function(df_rt, df_yq, title, subtitle = NULL, ncol = 2, shade_covid = TRUE) {
+    
+    year_breaks <- seq(
+      lubridate::floor_date(min(df_rt$date, na.rm = TRUE), unit = "year"),
+      lubridate::floor_date(max(df_rt$date, na.rm = TRUE), unit = "year"),
+      by = "1 year"
+    )
+    
+    p <- ggplot2::ggplot()
+    
+    if (isTRUE(shade_covid)) {
+      p <- p +
+        ggplot2::annotate(
+          "rect",
+          xmin = params$covid_start, xmax = params$covid_end,
+          ymin = -Inf, ymax = Inf,
+          fill = "grey80", alpha = 0.20
+        )
+    }
+    
+    p +
+      ggplot2::geom_line(
+        data = df_yq,
+        ggplot2::aes(x = date, y = GDP, color = "True GDP"),
+        linewidth = 1.0
+      ) +
+      ggplot2::geom_line(
+        data = df_rt,
+        ggplot2::aes(x = date, y = nowcast, color = type),
+        linewidth = 0.8
+      ) +
+      ggplot2::geom_point(
+        data = df_rt,
+        ggplot2::aes(x = date, y = nowcast, color = type),
+        size = 1.4
+      ) +
+      ggplot2::scale_color_manual(
+        values = c(
+          "True GDP" = "#D62728",
+          "M1"       = "#1F77B4",
+          "M2"       = "#2ECC71",
+          "M3"       = "#F1C40F"
+        ),
+        name = "Series"
+      ) +
+      ggplot2::scale_x_date(
+        breaks = year_breaks,
+        date_labels = "%Y",
+        expand = ggplot2::expansion(mult = c(0.01, 0.02))
+      ) +
+      ggplot2::facet_wrap(~ country, ncol = ncol, scales = "free_y") +
+      ggplot2::labs(
+        title = title,
+        subtitle = subtitle,
+        x = "Date",
+        y = "GDP growth"
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        legend.position  = "bottom",
+        axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1),
+        panel.grid.minor = ggplot2::element_blank(),
+        plot.title       = ggplot2::element_text(face = "bold", hjust = 0.5),
+        plot.subtitle    = ggplot2::element_text(hjust = 0.5, colour = "grey25"),
+        strip.text       = ggplot2::element_text(face = "bold")
+      )
+  }
+  
+  countries_big4   <- c("DE", "FR", "IT", "ES")
+  countries_other4 <- c("NL", "BE", "AT", "PT")
+  countries_post8  <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
+  
+  plot_all <- make_rt_plot(
+    df_rt     = df_rt_all,
+    df_yq     = df_yq_eval_all,
+    title     = "Rolling real-time nowcasts",
+    subtitle  = "Quarterly targets and monthly nowcast updates"
+  )
+  
+  plot_big4 <- make_rt_plot(
+    df_rt    = df_rt_all %>% dplyr::filter(country %in% countries_big4),
+    df_yq    = df_yq_eval_all %>% dplyr::filter(country %in% countries_big4),
+    title    = "Rolling real-time nowcasts: DE, FR, IT, ES",
+    subtitle = NULL
+  )
+  
+  plot_other4 <- make_rt_plot(
+    df_rt    = df_rt_all %>% dplyr::filter(country %in% countries_other4),
+    df_yq    = df_yq_eval_all %>% dplyr::filter(country %in% countries_other4),
+    title    = "Rolling real-time nowcasts: NL, BE, AT, PT",
+    subtitle = NULL
+  )
+  
+  df_rt_post8 <- df_rt_all %>%
+    dplyr::filter(country %in% countries_post8, date > params$covid_end)
+  
+  df_yq_post8 <- df_yq_eval_all %>%
+    dplyr::filter(country %in% countries_post8, date > params$covid_end)
+  
+  plot_post8 <- make_rt_plot(
+    df_rt    = df_rt_post8,
+    df_yq    = df_yq_post8,
+    title    = "Post-COVID rolling real-time nowcasts",
+    subtitle = paste0(
+      "Sample: ",
+      format(min(df_rt_post8$date, na.rm = TRUE), "%b %Y"),
+      "–",
+      format(max(df_rt_post8$date, na.rm = TRUE), "%b %Y")
+    ),
+    shade_covid = FALSE
+  )
+  
+  countries_available <- country_order[country_order %in% unique(as.character(df_rt_all$country))]
+  
+  plot_by_country <- lapply(countries_available, function(cc) {
+    
+    df_rt_cc <- df_rt_all %>% dplyr::filter(country == cc)
+    df_yq_cc <- df_yq_eval_all %>% dplyr::filter(country == cc)
+    
+    year_breaks_cc <- seq(
+      lubridate::floor_date(min(df_rt_cc$date, na.rm = TRUE), unit = "year"),
+      lubridate::floor_date(max(df_rt_cc$date, na.rm = TRUE), unit = "year"),
+      by = "1 year"
+    )
+    
+    ggplot2::ggplot() +
+      ggplot2::annotate(
+        "rect",
+        xmin = params$covid_start, xmax = params$covid_end,
+        ymin = -Inf, ymax = Inf,
+        fill = "grey80", alpha = 0.20
+      ) +
+      ggplot2::geom_line(
+        data = df_yq_cc,
+        ggplot2::aes(x = date, y = GDP, color = "True GDP"),
+        linewidth = 1.0
+      ) +
+      ggplot2::geom_line(
+        data = df_rt_cc,
+        ggplot2::aes(x = date, y = nowcast, color = type),
+        linewidth = 0.9
+      ) +
+      ggplot2::geom_point(
+        data = df_rt_cc,
+        ggplot2::aes(x = date, y = nowcast, color = type),
+        size = 1.5
+      ) +
+      ggplot2::scale_color_manual(
+        values = c(
+          "True GDP" = "#D62728",
+          "M1"       = "#1F77B4",
+          "M2"       = "#2ECC71",
+          "M3"       = "#F1C40F"
+        ),
+        name = "Series"
+      ) +
+      ggplot2::scale_x_date(
+        breaks = year_breaks_cc,
+        date_labels = "%Y",
+        expand = ggplot2::expansion(mult = c(0.01, 0.02))
+      ) +
+      ggplot2::labs(
+        title = paste("Rolling real-time nowcasts:", cc),
+        subtitle = NULL,
+        x = "Date",
+        y = "GDP growth"
+      ) +
+      ggplot2::theme_minimal(base_size = 14) +
+      ggplot2::theme(
+        legend.position  = "bottom",
+        axis.text.x      = ggplot2::element_text(angle = 45, hjust = 1),
+        panel.grid.minor = ggplot2::element_blank(),
+        plot.title       = ggplot2::element_text(face = "bold", hjust = 0.5),
+        plot.subtitle    = ggplot2::element_text(hjust = 0.5, colour = "grey25")
+      )
+  })
+  
+  names(plot_by_country) <- countries_available
+  
+  list(
+    plot_all        = plot_all,
+    plot_big4       = plot_big4,
+    plot_other4     = plot_other4,
+    plot_post8      = plot_post8,
+    plot_by_country = plot_by_country
+  )
+}
+
+# ==============================================================================
+# 7C. SAVE REAL-TIME PLOT VARIANTS
+# ==============================================================================
+
+save_rt_plot_variants <- function(
+    rt_plots,
+    path_graph_rt,
+    model_name,
+    Size = NULL,
+    sel = NULL,
+    width_full = 12,
+    height_full = 8,
+    width_country = 9,
+    height_country = 5,
+    dpi = 300
+) {
+  
+  path_graph_rt_full   <- file.path(path_graph_rt, "full_oos")
+  path_graph_rt_split  <- file.path(path_graph_rt, "split_groups")
+  path_graph_rt_post   <- file.path(path_graph_rt, "post_covid")
+  path_graph_rt_bycc   <- file.path(path_graph_rt, "by_country")
+  
+  dir.create(path_graph_rt_full,  recursive = TRUE, showWarnings = FALSE)
+  dir.create(path_graph_rt_split, recursive = TRUE, showWarnings = FALSE)
+  dir.create(path_graph_rt_post,  recursive = TRUE, showWarnings = FALSE)
+  dir.create(path_graph_rt_bycc,  recursive = TRUE, showWarnings = FALSE)
+  
+  tag_size <- if (!is.null(Size)) paste0("_Size-", Size) else ""
+  tag_sel  <- if (!is.null(sel))  paste0("_sel-", sel)  else ""
+  
+  file_graph_rt_all <- file.path(
+    path_graph_rt_full,
+    paste0("plot_rt_full_oos_", model_name, tag_size, tag_sel, ".png")
+  )
+  
+  file_graph_rt_big4 <- file.path(
+    path_graph_rt_split,
+    paste0("plot_rt_big4_", model_name, tag_size, tag_sel, ".png")
+  )
+  
+  file_graph_rt_other4 <- file.path(
+    path_graph_rt_split,
+    paste0("plot_rt_other4_", model_name, tag_size, tag_sel, ".png")
+  )
+  
+  file_graph_rt_post8 <- file.path(
+    path_graph_rt_post,
+    paste0("plot_rt_postcovid_8countries_", model_name, tag_size, tag_sel, ".png")
+  )
+  
+  ggplot2::ggsave(file_graph_rt_all,    rt_plots$plot_all,    width = width_full, height = height_full, dpi = dpi)
+  ggplot2::ggsave(file_graph_rt_big4,   rt_plots$plot_big4,   width = width_full, height = height_full, dpi = dpi)
+  ggplot2::ggsave(file_graph_rt_other4, rt_plots$plot_other4, width = width_full, height = height_full, dpi = dpi)
+  ggplot2::ggsave(file_graph_rt_post8,  rt_plots$plot_post8,  width = width_full, height = height_full, dpi = dpi)
+  
+  file_graph_rt_by_country <- list()
+  
+  if (!is.null(rt_plots$plot_by_country) && length(rt_plots$plot_by_country) > 0L) {
+    for (cc in names(rt_plots$plot_by_country)) {
+      file_cc <- file.path(
+        path_graph_rt_bycc,
+        paste0("plot_rt_", cc, "_", model_name, tag_size, tag_sel, ".png")
+      )
+      ggplot2::ggsave(
+        filename = file_cc,
+        plot     = rt_plots$plot_by_country[[cc]],
+        width    = width_country,
+        height   = height_country,
+        dpi      = dpi
+      )
+      file_graph_rt_by_country[[cc]] <- file_cc
+    }
+  }
+  
+  list(
+    path_graph_rt_full       = path_graph_rt_full,
+    path_graph_rt_split      = path_graph_rt_split,
+    path_graph_rt_post       = path_graph_rt_post,
+    path_graph_rt_bycc       = path_graph_rt_bycc,
+    file_graph_rt_all        = file_graph_rt_all,
+    file_graph_rt_big4       = file_graph_rt_big4,
+    file_graph_rt_other4     = file_graph_rt_other4,
+    file_graph_rt_post8      = file_graph_rt_post8,
+    file_graph_rt_by_country = file_graph_rt_by_country
   )
 }
 

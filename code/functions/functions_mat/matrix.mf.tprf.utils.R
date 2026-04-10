@@ -660,16 +660,45 @@ list_to_df_nowcast <- function(lst, tag) {
     row.names        = NULL
   )
 }
+
+format_month_year <- function(x) {
+  format(x, "%b %Y")
+}
+
+build_period_labels <- function(params) {
+  pre_end    <- seq(params$covid_start, by = "-1 month", length.out = 2)[2]
+  post_start <- seq(params$covid_end,   by = "+1 month", length.out = 2)[2]
+  
+  list(
+    "Pre-COVID" = c(
+      title = "Pre-COVID",
+      date  = paste0(format_month_year(params$start_eval), " -- ", format_month_year(pre_end))
+    ),
+    "COVID period" = c(
+      title = "COVID",
+      date  = paste0(format_month_year(params$covid_start), " -- ", format_month_year(params$covid_end))
+    ),
+    "Post-COVID" = c(
+      title = "Post-COVID",
+      date  = paste0(format_month_year(post_start), " -- ", format_month_year(params$end_eval))
+    )
+  )
+}
+
 build_final_large_style_latex <- function(
     summary_matrix,
     summary_vector,
     summary_vectensor,
+    params,
+    dm_vecp_wide = NULL,
+    dm_vecc_wide = NULL,
     Size = "large",
     sel = "LASSO"
 ) {
   
   country_order <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
   period_order  <- c("Pre-COVID", "COVID period", "Post-COVID")
+  period_labels <- build_period_labels(params)
   
   # ---------------------------------------------------------------------------
   # 1. Extract rolling RMSFE tables
@@ -734,6 +763,26 @@ build_final_large_style_latex <- function(
       Rel_VecC_M3 = Matrix_M3 / VecC_M3
     )
   
+  if (!is.null(dm_vecp_wide)) {
+    df <- df %>%
+      dplyr::left_join(dm_vecp_wide, by = c("country", "period"))
+  }
+  
+  if (!is.null(dm_vecc_wide)) {
+    df <- df %>%
+      dplyr::left_join(dm_vecc_wide, by = c("country", "period"))
+  }
+  
+  df <- df %>%
+    dplyr::mutate(
+      star_VecP_M1 = ifelse(Rel_VecP_M1 < 1, p_to_stars(p_VecP_M1), ""),
+      star_VecP_M2 = ifelse(Rel_VecP_M2 < 1, p_to_stars(p_VecP_M2), ""),
+      star_VecP_M3 = ifelse(Rel_VecP_M3 < 1, p_to_stars(p_VecP_M3), ""),
+      star_VecC_M1 = ifelse(Rel_VecC_M1 < 1, p_to_stars(p_VecC_M1), ""),
+      star_VecC_M2 = ifelse(Rel_VecC_M2 < 1, p_to_stars(p_VecC_M2), ""),
+      star_VecC_M3 = ifelse(Rel_VecC_M3 < 1, p_to_stars(p_VecC_M3), "")
+    )
+  
   # ---------------------------------------------------------------------------
   # 3. Hyperparameters
   # ---------------------------------------------------------------------------
@@ -778,7 +827,7 @@ build_final_large_style_latex <- function(
   
   matrix_hp_pre_txt <- paste0(
     "$L=", hp_mat_pre$Lproxy,
-    ",\\; P_h=", hp_mat_pre$L_midas - 1,
+    ",\\; P_f=", hp_mat_pre$L_midas - 1,
     ",\\; P_\\rho=", hp_mat_pre$p_AR,
     ",\\; (\\hat r_1,\\hat r_2)=(",
     hp_mat_pre$r_targeted[1], ",", hp_mat_pre$r_targeted[2], ")$"
@@ -786,7 +835,7 @@ build_final_large_style_latex <- function(
   
   matrix_hp_post_txt <- paste0(
     "$L=", hp_mat_post$Lproxy,
-    ",\\; P_h=", hp_mat_post$L_midas - 1,
+    ",\\; P_f=", hp_mat_post$L_midas - 1,
     ",\\; P_\\rho=", hp_mat_post$p_AR,
     ",\\; (\\hat r_1,\\hat r_2)=(",
     hp_mat_post$r_targeted[1], ",", hp_mat_post$r_targeted[2], ")$"
@@ -796,6 +845,12 @@ build_final_large_style_latex <- function(
   # 4. Helpers
   # ---------------------------------------------------------------------------
   fmt <- function(x) ifelse(is.na(x), "", sprintf("%.3f", x))
+  
+  fmt_star <- function(x, s = "") {
+    if (length(x) == 0 || is.na(x)) return("")
+    s <- ifelse(is.na(s) || s == "", "", paste0("\\sym{", s, "}"))
+    paste0(sprintf("%.3f", x), s)
+  }
   
   hp_cells <- function(hp_df, cc) {
     if (is.null(hp_df)) return(c("", "", "", ""))
@@ -809,29 +864,51 @@ build_final_large_style_latex <- function(
     )
   }
   
-  block_rows <- function(period_name, hp_matrix_txt = NULL, hp_vp = NULL, hp_vc = NULL) {
+  block_rows <- function(period_name, period_label = NULL,
+                         hp_matrix_txt = NULL, hp_vp = NULL, hp_vc = NULL) {
     out <- c()
     
-    out <- c(out, paste0("\\multicolumn{18}{l}{\\textbf{", period_name, "}}\\\\[-0.15em]"))
-    out <- c(out, "\\cmidrule(lr){1-18}")
+    if (is.null(period_label)) {
+      line1 <- "{\\fontsize{6.0}{6.4}\\selectfont\\textbf{Pre-COVID}}"
+      line2 <- ""
+    } else {
+      line1 <- paste0(
+        "{\\fontsize{6.0}{6.4}\\selectfont\\textbf{",
+        period_label["title"],
+        "}}"
+      )
+      line2 <- paste0(
+        "{\\fontsize{4.6}{4.8}\\selectfont ",
+        period_label["date"],
+        "}"
+      )
+    }
+    
+    out <- c(
+      out,
+      "\\specialrule{0.08em}{0.15em}{0.08em}",
+      paste0("\\multicolumn{18}{l}{", line1, "}\\\\[-0.60em]"),
+      paste0("\\multicolumn{18}{l}{", line2, "}\\\\[-0.32em]"),
+      "\\cmidrule{1-18}"
+    )
     
     if (!is.null(hp_matrix_txt)) {
       out <- c(
         out,
         paste0(
           "\\rowcolor{hypergray}\n",
-          "\\textit{\\fontsize{5.1}{6}\\selectfont Hyperparameter}",
+          "\\textit{\\fontsize{5.1}{6}\\selectfont Hyperparameters}",
           " & \\multicolumn{3}{@{}>{\\columncolor{hypergray}}c@{\\hspace{0.22cm}}}{\\fontsize{5.0}{5.8}\\selectfont ",
           hp_matrix_txt,
           "}",
           " & \\multicolumn{3}{c}{}",
           " & \\cellcolor{hypergray}\\hphdr $L$",
-          " & \\cellcolor{hypergray}\\hphdr $P_h$",
+          " & \\cellcolor{hypergray}\\hphdr $P_f$",
           " & \\cellcolor{hypergray}\\hphdr $P_\\rho$",
           " & \\cellcolor{hypergray}\\hphdr $r$",
           " & \\multicolumn{3}{c}{}",
           " & \\cellcolor{hypergray}\\hphdr $L$",
-          " & \\cellcolor{hypergray}\\hphdr $P_h$",
+          " & \\cellcolor{hypergray}\\hphdr $P_f$",
           " & \\cellcolor{hypergray}\\hphdr $P_\\rho$",
           " & \\cellcolor{hypergray}\\hphdr $r$",
           "\\\\[0.25em]"
@@ -855,9 +932,13 @@ build_final_large_style_latex <- function(
           "\\matcell{", fmt(row$Matrix_M1), "} & ",
           "\\matcell{", fmt(row$Matrix_M2), "} & ",
           "\\matcell{", fmt(row$Matrix_M3), "} & ",
-          fmt(row$Rel_VecP_M1), " & ", fmt(row$Rel_VecP_M2), " & ", fmt(row$Rel_VecP_M3), " & ",
+          fmt_star(row$Rel_VecP_M1, row$star_VecP_M1), " & ",
+          fmt_star(row$Rel_VecP_M2, row$star_VecP_M2), " & ",
+          fmt_star(row$Rel_VecP_M3, row$star_VecP_M3), " & ",
           "\\hpstyle ", hpvp[1], " & ", "\\hpstyle ", hpvp[2], " & ", "\\hpstyle ", hpvp[3], " & ", "\\hpstyle ", hpvp[4], " & ",
-          fmt(row$Rel_VecC_M1), " & ", fmt(row$Rel_VecC_M2), " & ", fmt(row$Rel_VecC_M3), " & ",
+          fmt_star(row$Rel_VecC_M1, row$star_VecC_M1), " & ",
+          fmt_star(row$Rel_VecC_M2, row$star_VecC_M2), " & ",
+          fmt_star(row$Rel_VecC_M3, row$star_VecC_M3), " & ",
           "\\hpstyle ", hpvc[1], " & ", "\\hpstyle ", hpvc[2], " & ", "\\hpstyle ", hpvc[3], " & ", "\\hpstyle ", hpvc[4], " \\\\"
         )
       )
@@ -866,16 +947,25 @@ build_final_large_style_latex <- function(
     out
   }
   
-  size_label <- toupper(Size)
-  sel_label  <- ifelse(
+  size_caption <- paste0(tolower(Size), " info set")
+  sel_caption  <- ifelse(
     toupper(sel) == "LASSO",
-    "LASSO variable selection",
-    paste0(sel, " variable selection")
+    "LASSO preselection",
+    "correlation preselection"
+  )
+  
+  table_note <- paste0(
+    "The first shaded block reports the Matrix MF--TPRF RMSFE for M1, M2, and M3 nowcasts. ",
+    "Relative RMSFE with respect to the pooled vector benchmark (VEC-P) and the country-specific vector benchmark (VEC-C) ",
+    "are reported in the two blocks on the right; values below one favour Matrix MF--TPRF. ",
+    "Asterisks denote one-sided Diebold--Mariano significance in favour of Matrix MF--TPRF, ",
+    "based on squared forecast errors and a Newey--West HAC variance estimator over the common evaluation sample ",
+    "($^{*}\\, p\\!<\\!0.10$, $^{**}\\, p\\!<\\!0.05$, $^{***}\\, p\\!<\\!0.01$)."
   )
   
   latex_lines <- c(
     "%=========================================================",
-    paste0("% ", size_label, " INFORMATION SET -- ", toupper(sel)),
+    paste0("% ", toupper(Size), " INFORMATION SET -- ", toupper(sel)),
     "%=========================================================",
     "\\begin{table}[htbp]",
     "\\centering",
@@ -886,15 +976,15 @@ build_final_large_style_latex <- function(
     "\\newcommand{\\hpstyle}{\\fontsize{4.6}{5.2}\\selectfont}",
     "\\newcommand{\\hphdr}{\\fontsize{4.7}{5.4}\\selectfont}",
     "\\newcommand{\\matcell}[1]{\\cellcolor{matrixgray}#1}",
+    "\\newcommand{\\sym}[1]{\\rlap{\\hspace{0.05em}\\textsuperscript{\\fontsize{4.0}{4.0}\\selectfont#1}}}",
     "",
     "\\definecolor{topgray}{gray}{0.86}",
     "\\definecolor{hypergray}{gray}{0.91}",
     "\\definecolor{matrixgray}{gray}{0.965}",
     "",
     paste0(
-      "\\caption{RMSFE and relative RMSFE across countries: ",
-      tolower(Size),
-      " information set (", sel_label, ")}"
+      "\\caption{Matrix MF--TPRF and relative RMSFE by country: ",
+      size_caption, " \\& ", sel_caption, "}"
     ),
     paste0("\\label{tab:EA_nowcast_", tolower(Size), "_", tolower(sel), "}"),
     "",
@@ -906,15 +996,15 @@ build_final_large_style_latex <- function(
     ">{\\columncolor{matrixgray}\\centering\\arraybackslash}p{0.97cm}",
     ">{\\columncolor{matrixgray}\\centering\\arraybackslash}p{0.97cm}",
     "@{\\hspace{0.22cm}}",
-    "*{3}{>{\\centering\\arraybackslash}p{0.78cm}}",
+    "*{3}{>{\\centering\\arraybackslash}p{0.86cm}}",
     "*{4}{>{\\centering\\arraybackslash}p{0.14cm}}",
     "@{\\hspace{0.22cm}}",
-    "*{3}{>{\\centering\\arraybackslash}p{0.78cm}}",
+    "*{3}{>{\\centering\\arraybackslash}p{0.86cm}}",
     "*{4}{>{\\centering\\arraybackslash}p{0.14cm}}",
     "}",
     "\\toprule",
     paste0(
-      "\\multicolumn{1}{>{\\cellcolor{topgray}}c@{\\hspace{0.22cm}}}{\\textbf{", size_label, "}}",
+      "\\multicolumn{1}{>{\\cellcolor{topgray}}c@{\\hspace{0.22cm}}}{\\textbf{", toupper(Size), "}}",
       " & \\multicolumn{3}{@{}>{\\columncolor{matrixgray}}c@{\\hspace{0.22cm}}}{\\textbf{Matrix MF--TPRF}}",
       " & \\multicolumn{7}{c}{\\textbf{$\\dfrac{\\text{Matrix MF--TPRF}}{\\text{VEC-P MF--TPRF}}$}}",
       " & \\multicolumn{7}{c}{\\textbf{$\\dfrac{\\text{Matrix MF--TPRF}}{\\text{VEC-C MF--TPRF}}$}}"
@@ -926,24 +1016,35 @@ build_final_large_style_latex <- function(
     "& M1 & M2 & M3 & \\multicolumn{4}{c}{HP}",
     "& M1 & M2 & M3 & \\multicolumn{4}{c}{HP}",
     "\\\\",
-    "\\midrule",
-    block_rows("Pre-COVID",  hp_matrix_txt = matrix_hp_pre_txt,  hp_vp = hp_vtp_pre,  hp_vc = hp_vec_pre),
-    "\\midrule",
-    block_rows("COVID period", hp_matrix_txt = NULL, hp_vp = hp_vtp_pre, hp_vc = hp_vec_pre),
-    "\\midrule",
-    block_rows("Post-COVID", hp_matrix_txt = matrix_hp_post_txt, hp_vp = hp_vtp_post, hp_vc = hp_vec_post),
+    block_rows("Pre-COVID",
+               period_label = period_labels[["Pre-COVID"]],
+               hp_matrix_txt = matrix_hp_pre_txt,
+               hp_vp = hp_vtp_pre,
+               hp_vc = hp_vec_pre),
+    block_rows("COVID period",
+               period_label = period_labels[["COVID period"]],
+               hp_matrix_txt = NULL,
+               hp_vp = hp_vtp_pre,
+               hp_vc = hp_vec_pre),
+    block_rows("Post-COVID",
+               period_label = period_labels[["Post-COVID"]],
+               hp_matrix_txt = matrix_hp_post_txt,
+               hp_vp = hp_vtp_post,
+               hp_vc = hp_vec_post),
     "\\bottomrule",
     "\\end{tabular}%",
     "}",
-    "\\vspace{0.2cm}",
-    "\\parbox{0.96\\textwidth}{\\footnotesize",
-    "}",
+    "\\vspace{0.15cm}",
+    paste0(
+      "\\parbox{0.96\\textwidth}{\\footnotesize ",
+      table_note,
+      "}"
+    ),
     "\\end{table}"
   )
   
   paste(latex_lines, collapse = "\n")
 }
-
 
 save_selection_wide_to_latex <- function(df_selection_wide,
                                          file,
@@ -1337,4 +1438,84 @@ build_latex_selection_table <- function(sel_small, sel_medium, sel_large,
   )
   
   paste0(header, paste(body_lines, collapse = "\n"), footer)
+}
+
+# ==============================================================================
+# DM TEST 
+# ==============================================================================
+
+make_quarter_id <- function(x) {
+  paste0(year(x), "Q", quarter(x))
+}
+
+build_eval_df <- function(df_rt, df_y) {
+  df_rt %>%
+    mutate(
+      quarter_id = make_quarter_id(date)
+    ) %>%
+    left_join(
+      df_y %>%
+        select(country, quarter_id, GDP, period),
+      by = c("country", "quarter_id")
+    ) %>%
+    mutate(
+      error = GDP - nowcast,
+      se    = error^2
+    )
+}
+
+p_to_stars <- function(p) {
+  case_when(
+    is.na(p)   ~ "",
+    p < 0.01   ~ "***",
+    p < 0.05   ~ "**",
+    p < 0.10   ~ "*",
+    TRUE       ~ ""
+  )
+}
+
+fmt_star <- function(x, s = "") {
+  if (length(x) == 0 || is.na(x)) return("")
+  s <- ifelse(is.na(s), "", s)
+  paste0(sprintf("%.3f", x), s)
+}
+
+dm_test_hac <- function(d, lag = NULL, alternative = c("less", "two.sided", "greater")) {
+  alternative <- match.arg(alternative)
+  d <- d[is.finite(d)]
+  n <- length(d)
+  
+  if (n < 4) {
+    return(data.frame(
+      n = n,
+      mean_d = NA_real_,
+      stat = NA_real_,
+      p_value = NA_real_
+    ))
+  }
+  
+  if (is.null(lag)) {
+    lag <- floor(n^(1/3))
+  }
+  
+  fit <- lm(d ~ 1)
+  vc  <- sandwich::NeweyWest(fit, lag = lag, prewhite = FALSE, adjust = TRUE)
+  
+  mean_d  <- coef(fit)[1]
+  se_mean <- sqrt(vc[1, 1])
+  stat    <- mean_d / se_mean
+  
+  p_value <- switch(
+    alternative,
+    "less"      = pnorm(stat),
+    "greater"   = 1 - pnorm(stat),
+    "two.sided" = 2 * pnorm(-abs(stat))
+  )
+  
+  data.frame(
+    n = n,
+    mean_d = mean_d,
+    stat = stat,
+    p_value = p_value
+  )
 }

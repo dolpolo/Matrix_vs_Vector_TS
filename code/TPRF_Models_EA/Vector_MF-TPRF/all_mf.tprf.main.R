@@ -6,9 +6,10 @@
 #   1. Prepares country-specific datasets
 #   2. Runs the MF-TPRF for all countries
 #   3. Builds cross-country plots and RMSFE tables
-#   4. Runs a detailed single-country estimation
-#   5. Runs a pseudo real-time exercise for one country
-#   6. Saves all outputs in a consistent format
+#   4. Builds additional real-time plot variants
+#   5. Runs a detailed single-country estimation
+#   6. Runs a pseudo real-time exercise for one country
+#   7. Saves all outputs in a consistent format
 # ==============================================================================
 
 # ==============================================================================
@@ -24,9 +25,11 @@ path_func     <- file.path(path_main, "functions/functions_vec")
 
 path_results  <- file.path(path_main, "TPRF_Models_EA/Vector_MF-TPRF/results/outputs")
 path_graph    <- file.path(path_main, "TPRF_Models_EA/Vector_MF-TPRF/results/graph")
+path_graph_rt <- file.path(path_main, "TPRF_Models_EA/Vector_MF-TPRF/results/graph_rt")
 
-dir.create(path_results, recursive = TRUE, showWarnings = FALSE)
-dir.create(path_graph,   recursive = TRUE, showWarnings = FALSE)
+dir.create(path_results,  recursive = TRUE, showWarnings = FALSE)
+dir.create(path_graph,    recursive = TRUE, showWarnings = FALSE)
+dir.create(path_graph_rt, recursive = TRUE, showWarnings = FALSE)
 
 # ==============================================================================
 # 1. PACKAGES
@@ -76,7 +79,7 @@ params <- list(
   
   target       = "GDP",
   
-  sel_method   = "corr",  # "corr" | "LASSO"
+  sel_method   = "LASSO",  # "corr" | "LASSO"
   n_m          = 20,
   n_q          = 5,
   thr_m        = 0.10,
@@ -101,7 +104,6 @@ country   <- "IT"
 
 tag_run <- build_run_tag(params)
 
-# Tags used in all saved outputs
 model_name <- "vector"
 Size       <- get_size_tag(params$n_m, params$n_q)
 sel        <- params$sel_method
@@ -152,11 +154,35 @@ cross_out <- build_cross_country_outputs(
 )
 
 # ==============================================================================
+# 5B. REAL-TIME PLOT VARIANTS
+# ==============================================================================
+
+rt_plot_variants <- build_rt_plot_variants(
+  df_rt_all      = cross_out$df_rt_all,
+  df_yq_eval_all = cross_out$df_yq_eval_all,
+  params         = params,
+  model_label    = "VEC-C MF-TPRF"
+)
+
+rt_plot_files <- save_rt_plot_variants(
+  rt_plots      = rt_plot_variants,
+  path_graph_rt = path_graph_rt,
+  model_name    = model_name,
+  Size          = Size,
+  sel           = sel
+)
+
+# ==============================================================================
 # 6. CROSS-COUNTRY OUTPUTS
 # ==============================================================================
 
 print(cross_out$plot_nowcast_facet)
 print(cross_out$plot_rt_facet)
+
+print(rt_plot_variants$plot_all)
+print(rt_plot_variants$plot_big4)
+print(rt_plot_variants$plot_other4)
+print(rt_plot_variants$plot_post8)
 
 cat(cross_out$latex_tab_insample_all)
 cat(cross_out$latex_tab_rt_all)
@@ -230,6 +256,10 @@ ggsave(file_graph_rt,   cross_out$plot_rt_facet,      width = 14, height = 8, dp
 writeLines(cross_out$latex_tab_insample_all, con = file_tex_insample)
 writeLines(cross_out$latex_tab_rt_all,       con = file_tex_rt)
 
+# ==============================================================================
+# 8. SAVE SUMMARY OBJECT
+# ==============================================================================
+
 file_summary_cross <- build_result_filename(
   path_out         = path_results,
   model            = model_name,
@@ -286,6 +316,9 @@ saveRDS(
     tab_rt_all             = cross_out$tab_rt_all,
     latex_tab_rt_all       = cross_out$latex_tab_rt_all,
     
+    rt_plot_variants       = rt_plot_variants,
+    rt_plot_files          = rt_plot_files,
+    
     file_graph_full        = file_graph_full,
     file_graph_rt          = file_graph_rt,
     file_tex_insample      = file_tex_insample,
@@ -300,3 +333,9 @@ cat(file_graph_full, "\n")
 cat(file_graph_rt, "\n")
 cat(file_tex_insample, "\n")
 cat(file_tex_rt, "\n")
+
+cat("\nSaved additional real-time plot variants to:\n")
+cat(rt_plot_files$file_graph_rt_all, "\n")
+cat(rt_plot_files$file_graph_rt_big4, "\n")
+cat(rt_plot_files$file_graph_rt_other4, "\n")
+cat(rt_plot_files$file_graph_rt_post8, "\n")

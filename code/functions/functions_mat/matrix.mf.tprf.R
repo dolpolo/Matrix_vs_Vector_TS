@@ -480,6 +480,124 @@ mf_tprf_pass1_ils <- function(
     er_col = er_col
   )
 }
+
+
+mf_tprf_pass1_ils_fixed <- function(
+    X_lf, Z_q,
+    fixed_r = c(2, 3),
+    orthonormalize_Z = TRUE,
+    center_Z = TRUE,
+    maxit = 100,
+    tol = 1e-8
+) {
+  stopifnot(length(dim(X_lf)) == 3)
+  if (anyNA(X_lf)) stop("X_lf contains NA; Pass 1 expects complete X_lf.")
+  
+  Tq <- dim(X_lf)[1]
+  p1 <- dim(X_lf)[2]
+  p2 <- dim(X_lf)[3]
+  
+  Z_q <- as.matrix(Z_q)
+  if (nrow(Z_q) != Tq) stop("nrow(Z_q) must match dim(X_lf)[1].")
+  
+  r1 <- as.integer(fixed_r[1])
+  r2 <- as.integer(fixed_r[2])
+  
+  if (r1 < 1 || r1 > p1) stop("Invalid fixed r1.")
+  if (r2 < 1 || r2 > p2) stop("Invalid fixed r2.")
+  
+  if (center_Z) {
+    Zc <- scale(Z_q, center = TRUE, scale = FALSE)
+  } else {
+    Zc <- Z_q
+  }
+  
+  if (orthonormalize_Z) {
+    qrZ <- qr(Zc)
+    if (qrZ$rank < ncol(Zc)) stop("Z_q columns are linearly dependent.")
+    Z <- qr.Q(qrZ)
+  } else {
+    Z <- Zc
+  }
+  
+  L <- ncol(Z)
+  
+  Mlist <- vector("list", L)
+  for (l in 1:L) Mlist[[l]] <- matrix(0, nrow = p1, ncol = p2)
+  
+  for (t in 1:Tq) {
+    Xt <- X_lf[t, , ]
+    zt <- Z[t, ]
+    for (l in 1:L) {
+      Mlist[[l]] <- Mlist[[l]] + zt[l] * Xt
+    }
+  }
+  for (l in 1:L) Mlist[[l]] <- Mlist[[l]] / Tq
+  
+  S_R0 <- matrix(0, nrow = p1, ncol = p1)
+  S_C0 <- matrix(0, nrow = p2, ncol = p2)
+  for (l in 1:L) {
+    Ml <- Mlist[[l]]
+    S_R0 <- S_R0 + Ml %*% t(Ml)
+    S_C0 <- S_C0 + t(Ml) %*% Ml
+  }
+  
+  ec0 <- eigen(S_C0, symmetric = TRUE)
+  C_hat <- sqrt(p2) * ec0$vectors[, 1:r2, drop = FALSE]
+  
+  obj_path <- numeric(0)
+  obj_old <- -Inf
+  
+  for (it in 1:maxit) {
+    CCt <- C_hat %*% t(C_hat)
+    S_R <- matrix(0, nrow = p1, ncol = p1)
+    for (l in 1:L) {
+      Ml <- Mlist[[l]]
+      S_R <- S_R + Ml %*% CCt %*% t(Ml)
+    }
+    er <- eigen(S_R, symmetric = TRUE)
+    R_hat <- sqrt(p1) * er$vectors[, 1:r1, drop = FALSE]
+    
+    RRt <- R_hat %*% t(R_hat)
+    S_C <- matrix(0, nrow = p2, ncol = p2)
+    for (l in 1:L) {
+      Ml <- Mlist[[l]]
+      S_C <- S_C + t(Ml) %*% RRt %*% Ml
+    }
+    ec <- eigen(S_C, symmetric = TRUE)
+    C_hat <- sqrt(p2) * ec$vectors[, 1:r2, drop = FALSE]
+    
+    obj <- 0
+    for (l in 1:L) {
+      A <- t(R_hat) %*% Mlist[[l]] %*% C_hat
+      obj <- obj + sum(A * A)
+    }
+    obj_path <- c(obj_path, obj)
+    
+    if (abs(obj - obj_old) < tol * max(1, abs(obj_old))) break
+    obj_old <- obj
+  }
+  
+  dn <- dimnames(X_lf)
+  countries <- if (!is.null(dn[[2]])) dn[[2]] else paste0("c", seq_len(p1))
+  vars      <- if (!is.null(dn[[3]])) dn[[3]] else paste0("v", seq_len(p2))
+  rownames(R_hat) <- countries; colnames(R_hat) <- paste0("r", 1:r1)
+  rownames(C_hat) <- vars;      colnames(C_hat) <- paste0("c", 1:r2)
+  
+  list(
+    R = R_hat,
+    C = C_hat,
+    Z_used = Z,
+    Mlist = Mlist,
+    obj_path = obj_path,
+    r_selected = c(r1, r2),
+    S_R0 = S_R0,
+    S_C0 = S_C0,
+    er_row = NULL,
+    er_col = NULL
+  )
+}
+
 # ==============================================================================
 # PASS 2 (Matrix MF-TPRF): monthly factors from HF tensor given R,C
 #   Inputs:
@@ -1125,6 +1243,290 @@ Tensor_MF_TPRF <- function(
     by_country = results_country,
     meta = list(
       Lproxy = Lproxy, L_midas = L_midas, p_AR = p_AR, rmax = c(rmax1, rmax2),
+      standardize_proxy = standardize_proxy
+    )
+  )
+}
+
+
+Tensor_MF_TPRF_fixed <- function(
+    X_lf, X_hf, Y_q_all,
+    proxy_name = "EA",
+    Lproxy = 1,
+    L_midas = 1,
+    p_AR = 1,
+    fixed_r = c(2, 3),
+    standardize_proxy = TRUE,
+    orthonormalize_each_iter = TRUE,
+    orthonormalize_final_Z = TRUE,
+    ils_maxit = 100,
+    ils_tol = 1e-8
+) {
+  
+  # ---- checks
+  stopifnot(length(dim(X_lf)) == 3, length(dim(X_hf)) == 3)
+  if (anyNA(X_lf) || anyNA(X_hf)) {
+    stop("X_lf / X_hf contain NA. This version expects complete arrays.")
+  }
+  
+  T_q <- dim(X_lf)[1]
+  T_m <- dim(X_hf)[1]
+  p1  <- dim(X_lf)[2]
+  p2  <- dim(X_lf)[3]
+  
+  if (dim(X_hf)[2] != p1 || dim(X_hf)[3] != p2) {
+    stop("X_hf must have same (p1,p2) as X_lf.")
+  }
+  if (T_m < 3 * T_q) {
+    stop("Need at least 3*T_q months in X_hf to cover all quarters.")
+  }
+  
+  if (!proxy_name %in% colnames(Y_q_all)) {
+    stop("proxy_name not found in colnames(Y_q_all).")
+  }
+  
+  if (!is.finite(Lproxy) || Lproxy < 1) stop("Lproxy must be integer >= 1.")
+  if (!is.finite(L_midas) || L_midas < 1) stop("L_midas must be integer >= 1.")
+  if (!is.finite(p_AR) || p_AR < 0) stop("p_AR must be integer >= 0.")
+  
+  Lproxy  <- as.integer(Lproxy)
+  L_midas <- as.integer(L_midas)
+  p_AR    <- as.integer(p_AR)
+  
+  if (length(fixed_r) != 2) stop("fixed_r must be c(r1, r2).")
+  r1 <- as.integer(fixed_r[1])
+  r2 <- as.integer(fixed_r[2])
+  if (r1 < 1 || r1 > p1) stop("Invalid fixed r1.")
+  if (r2 < 1 || r2 > p2) stop("Invalid fixed r2.")
+  
+  countries <- setdiff(colnames(Y_q_all), proxy_name)
+  
+  y_proxy <- as.numeric(Y_q_all[, proxy_name])
+  if (length(y_proxy) != T_q) {
+    stop("Proxy y length must match dim(X_lf)[1].")
+  }
+  
+  # dimnames
+  dnq <- dimnames(X_lf)
+  dnm <- dimnames(X_hf)
+  dates_q <- if (!is.null(dnq[[1]])) dnq[[1]] else as.character(seq_len(T_q))
+  dates_m <- if (!is.null(dnm[[1]])) dnm[[1]] else as.character(seq_len(T_m))
+  
+  # ==================================================
+  # STEP 1: build autoproxies with FIXED rank
+  # ==================================================
+  y1 <- as.numeric(y_proxy)
+  if (standardize_proxy) {
+    y1 <- (y1 - mean(y1)) / sd(y1)
+  }
+  
+  coln <- if (Lproxy == 1) {
+    "y_ea"
+  } else {
+    c("y_ea", paste0("e", 1:(Lproxy - 1)))
+  }
+  
+  Z_raw <- matrix(
+    NA_real_,
+    nrow = T_q,
+    ncol = Lproxy,
+    dimnames = list(dates_q, coln)
+  )
+  Z_raw[, 1] <- y1
+  
+  yhat_list <- if (Lproxy > 1) vector("list", Lproxy - 1) else NULL
+  e_list    <- if (Lproxy > 1) vector("list", Lproxy - 1) else NULL
+  
+  last_R <- NULL
+  last_C <- NULL
+  last_F_hf <- NULL
+  last_fit3 <- NULL
+  
+  if (Lproxy > 1) {
+    for (ell in 1:(Lproxy - 1)) {
+      
+      Z_curr <- Z_raw[, 1:ell, drop = FALSE]
+      
+      # fixed-rank pass 1
+      pass1_tmp <- mf_tprf_pass1_ils_fixed(
+        X_lf = X_lf,
+        Z_q  = Z_curr,
+        fixed_r = fixed_r,
+        orthonormalize_Z = orthonormalize_each_iter,
+        center_Z = TRUE,
+        maxit = ils_maxit,
+        tol   = ils_tol
+      )
+      
+      # pass 2
+      pass2_tmp <- mf_tprf_pass2_factors(
+        X_hf = X_hf,
+        R    = pass1_tmp$R,
+        C    = pass1_tmp$C,
+        T_q  = T_q,
+        scale_fac = 1 / (p1 * p2)
+      )
+      
+      # pass 3 on proxy
+      fit3_tmp <- mf_tprf_pass3_fit_quarterly(
+        y_q = y1,
+        F1 = pass2_tmp$F1,
+        F2 = pass2_tmp$F2,
+        F3 = pass2_tmp$F3,
+        p_AR = p_AR,
+        L_midas = L_midas
+      )
+      
+      yhat <- fit3_tmp$yhat_q
+      e    <- y1 - yhat
+      e[is.na(e)] <- y1[is.na(e)]
+      
+      yhat_list[[ell]] <- yhat
+      e_list[[ell]]    <- e
+      
+      Z_raw[, ell + 1] <- e
+      
+      last_R    <- pass1_tmp$R
+      last_C    <- pass1_tmp$C
+      last_F_hf <- pass2_tmp$F_hf
+      last_fit3 <- fit3_tmp$fit
+    }
+  }
+  
+  Z_q <- if (orthonormalize_final_Z) {
+    qr.Q(qr(scale(Z_raw, center = TRUE, scale = FALSE)))
+  } else {
+    Z_raw
+  }
+  colnames(Z_q) <- coln
+  rownames(Z_q) <- dates_q
+  
+  autoproxy_out <- list(
+    Z_raw = Z_raw,
+    Z = Z_q,
+    yhat_list = yhat_list,
+    e_list = e_list,
+    last_R = last_R,
+    last_C = last_C,
+    last_F_hf = last_F_hf,
+    last_fit3 = last_fit3,
+    meta = list(
+      Lproxy = Lproxy,
+      L_midas = L_midas,
+      p_AR = p_AR,
+      fixed_r = fixed_r,
+      standardize_y = standardize_proxy,
+      orthonormalize_each_iter = orthonormalize_each_iter,
+      orthonormalize_final = orthonormalize_final_Z
+    )
+  )
+  
+  # ==================================================
+  # STEP 2: final Pass 1 with FIXED rank
+  # ==================================================
+  pass1 <- mf_tprf_pass1_ils_fixed(
+    X_lf = X_lf,
+    Z_q  = Z_q,
+    fixed_r = fixed_r,
+    orthonormalize_Z = TRUE,
+    center_Z = TRUE,
+    maxit = ils_maxit,
+    tol = ils_tol
+  )
+  
+  Rhat <- pass1$R
+  Chat <- pass1$C
+  
+  # ==================================================
+  # STEP 3: factors from HF tensor
+  # ==================================================
+  pass2 <- mf_tprf_pass2_factors(
+    X_hf = X_hf,
+    R = Rhat,
+    C = Chat,
+    T_q = T_q,
+    scale_fac = 1 / (p1 * p2)
+  )
+  
+  # ==================================================
+  # STEP 4: per-country quarterly fit + monthly nowcast
+  # ==================================================
+  results_country <- vector("list", length(countries))
+  names(results_country) <- countries
+  
+  for (cc in countries) {
+    y_cc <- as.numeric(Y_q_all[, cc])
+    if (length(y_cc) != T_q) {
+      stop(paste0("Country ", cc, ": y length mismatch."))
+    }
+    
+    fit3 <- mf_tprf_pass3_fit_quarterly(
+      y_q = y_cc,
+      F1 = pass2$F1,
+      F2 = pass2$F2,
+      F3 = pass2$F3,
+      p_AR = p_AR,
+      L_midas = L_midas
+    )
+    
+    y_now <- mf_tprf_nowcast_monthly(
+      beta0 = fit3$beta0,
+      rho_hat = fit3$rho_hat,
+      beta_mat = fit3$beta_mat,
+      y_q = y_cc,
+      F1 = pass2$F1,
+      F2 = pass2$F2,
+      F3 = pass2$F3,
+      F_next1 = pass2$F_next1,
+      F_next2 = pass2$F_next2,
+      F_next3 = pass2$F_next3,
+      p_AR = p_AR,
+      L_midas = L_midas,
+      T_q = T_q,
+      T_m = T_m
+    )
+    
+    results_country[[cc]] <- list(
+      fit3 = fit3$fit,
+      beta0 = fit3$beta0,
+      rho_hat = fit3$rho_hat,
+      beta_mat = fit3$beta_mat,
+      start_tau = fit3$start_tau,
+      yhat_q = fit3$yhat_q,
+      y_nowcast = y_now
+    )
+  }
+  
+  # ==================================================
+  # OUTPUT
+  # ==================================================
+  list(
+    proxy_name = proxy_name,
+    Z_q = Z_q,
+    autoproxy = autoproxy_out,
+    R = Rhat,
+    C = Chat,
+    r_selected = fixed_r,
+    pass1_obj_path = pass1$obj_path,
+    factors = list(
+      F_hf = pass2$F_hf,
+      F_vec = pass2$F_vec,
+      F1 = pass2$F1,
+      F2 = pass2$F2,
+      F3 = pass2$F3,
+      rem = pass2$rem,
+      F_next1 = pass2$F_next1,
+      F_next2 = pass2$F_next2,
+      F_next3 = pass2$F_next3,
+      dates_m = dates_m,
+      dates_q = dates_q
+    ),
+    by_country = results_country,
+    meta = list(
+      Lproxy = Lproxy,
+      L_midas = L_midas,
+      p_AR = p_AR,
+      fixed_r = fixed_r,
       standardize_proxy = standardize_proxy
     )
   )

@@ -81,8 +81,8 @@ params <- list(
   
   # Variable selection
   sel_method  = "LASSO",      # "corr" | "corr_threshold" | "F-Test" | "LASSO"
-  n_m         = 30,
-  n_q         = 30,
+  n_m         = 20,
+  n_q         = 5,
   thr_m       = 0.10,
   thr_q       = 0.85,
   thr_F_test  = 0.01,
@@ -435,4 +435,49 @@ saveRDS(
 )
 
 cat("\nSaved pseudo real-time results to:\n", file_rt, "\n")
+
+
+
+# ==============================================================================
+# 9B. APPENDIX: FIXED-RANK ESTIMATION
+# ==============================================================================
+
+fixed_r <- c(2, 3)
+
+fit_tensor_fixed <- Tensor_MF_TPRF_fixed(
+  X_lf                     = X_cl_q,
+  X_hf                     = X_cl,
+  Y_q_all                  = y_q_all,
+  proxy_name               = "EA",
+  Lproxy                   = Lproxy,
+  L_midas                  = L_midas,
+  p_AR                     = p_ar,
+  fixed_r                  = fixed_r,
+  standardize_proxy        = TRUE,
+  orthonormalize_each_iter = TRUE,
+  orthonormalize_final_Z   = TRUE,
+  ils_maxit                = 100,
+  ils_tol                  = 1e-8
+)
+
+r1_fixed <- fit_tensor_fixed$r_selected[1]
+r2_fixed <- fit_tensor_fixed$r_selected[2]
+
+file_fixed <- file.path(
+  path_results,
+  paste0(
+    "fit_fixed_",
+    model_name,
+    "_Size-", Size,
+    "_sel-", sel,
+    "_r1-", r1_fixed,
+    "_r2-", r2_fixed,
+    ".rds"
+  )
+)
+
+dir.create(dirname(file_fixed), recursive = TRUE, showWarnings = FALSE)
+saveRDS(fit_tensor_fixed, file = file_fixed)
+
+cat("\nSaved fixed-rank results to:\n", file_fixed, "\n")
 

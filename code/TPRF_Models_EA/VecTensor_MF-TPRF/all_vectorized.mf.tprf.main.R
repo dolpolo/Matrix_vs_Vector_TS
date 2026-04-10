@@ -6,7 +6,8 @@
 #   2. Vectorizes the tensor into a mixed-frequency panel
 #   3. Runs MF-TPRF for all countries on tensor-vectorized data
 #   4. Builds cross-country plots and RMSFE tables
-#   5. Saves outputs in a consistent format
+#   5. Builds additional real-time plot variants
+#   6. Saves all outputs in a consistent format
 # ==============================================================================
 
 # ==============================================================================
@@ -24,9 +25,11 @@ path_func_vec <- file.path(path_main, "functions/functions_vec")
 
 path_results_vec <- file.path(path_main, "TPRF_Models_EA/VecTensor_MF-TPRF/results/outputs_vec")
 path_graph_vec   <- file.path(path_main, "TPRF_Models_EA/VecTensor_MF-TPRF/results/graph_vec")
+path_graph_rt    <- file.path(path_main, "TPRF_Models_EA/VecTensor_MF-TPRF/results/graph_rt_vec")
 
 dir.create(path_results_vec, recursive = TRUE, showWarnings = FALSE)
 dir.create(path_graph_vec,   recursive = TRUE, showWarnings = FALSE)
+dir.create(path_graph_rt,    recursive = TRUE, showWarnings = FALSE)
 
 # ==============================================================================
 # 1. PACKAGES
@@ -111,8 +114,8 @@ params <- list(
   target_cc    = "EA",
   
   sel_method   = "corr",
-  n_m          = 20,
-  n_q          = 5,
+  n_m          = 25,
+  n_q          = 15,
   thr_m        = 0.10,
   thr_q        = 0.85,
   thr_F_test   = 0.01,
@@ -202,17 +205,196 @@ cross_out <- build_cross_country_outputs(
 )
 
 # ==============================================================================
-# 8. CROSS-COUNTRY OUTPUTS
+# 7. LOAD PREVIOUSLY SAVED SUMMARY
+# ==============================================================================
+
+file_summary_cross <- build_result_filename(
+  path_out         = path_results_vec,
+  model            = model_name,
+  stage            = "summary",
+  Size             = Size,
+  sel              = sel,
+  countries        = setdiff(countries, params$target_cc),
+  N_m              = params$n_m,
+  N_q              = params$n_q,
+  Lproxy           = NA,
+  L_midas          = NA,
+  p_ar             = NA,
+  r1               = NA,
+  r2               = NA,
+  robust_f         = as.integer(isTRUE(params$Robust_F)),
+  covid_m          = as.integer(isTRUE(params$covid_mask_m)),
+  covid_q          = as.integer(isTRUE(params$covid_mask_q)),
+  ext              = "rds",
+  timestamp        = FALSE,
+  include_details  = TRUE
+)
+
+summary_cross <- readRDS(file_summary_cross)
+
+cross_out <- list(
+  hyper_full_all         = summary_cross$hyper_full_all,
+  hyper_rt_pre_all       = summary_cross$hyper_rt_pre_all,
+  hyper_rt_post_all      = summary_cross$hyper_rt_post_all,
+  df_now_full_all        = summary_cross$df_now_full_all,
+  df_quarterly_all       = summary_cross$df_quarterly_all,
+  plot_nowcast_facet     = summary_cross$plot_nowcast_facet,
+  tab_insample_all       = summary_cross$tab_insample_all,
+  latex_tab_insample_all = summary_cross$latex_tab_insample_all,
+  df_rt_all              = summary_cross$df_rt_all,
+  df_yq_eval_all         = summary_cross$df_yq_eval_all,
+  plot_rt_facet          = summary_cross$plot_rt_facet,
+  tab_rt_all             = summary_cross$tab_rt_all,
+  latex_tab_rt_all       = summary_cross$latex_tab_rt_all
+)
+
+rt_plot_variants <- summary_cross$rt_plot_variants
+rt_plot_files    <- summary_cross$rt_plot_files
+
+graph_titles <- summary_cross$graph_titles
+
+missing_by_country <- if (!is.null(summary_cross$missing_by_country)) {
+  summary_cross$missing_by_country
+} else {
+  NULL
+}
+
+# ==============================================================================
+# 7B. REAL-TIME PLOT VARIANTS
+# ==============================================================================
+
+summary_cross <- readRDS(file_summary_cross)
+
+rt_plot_variants <- build_rt_plot_variants(
+  df_rt_all      = cross_out$df_rt_all,
+  df_yq_eval_all = cross_out$df_yq_eval_all,
+  params         = params,
+  model_label    = "VEC-P MF-TPRF"
+)
+
+rt_plot_files <- save_rt_plot_variants(
+  rt_plots      = rt_plot_variants,
+  path_graph_rt = path_graph_rt,
+  model_name    = model_name,
+  Size          = Size,
+  sel           = sel
+)
+
+# ==============================================================================
+# 8. GRAPH TITLE REGISTER
+# ==============================================================================
+
+graph_titles <- list(
+  main_full_sample = list(
+    monthly_nowcasts_vs_gdp = list(
+      title    = "Monthly nowcasts and observed GDP",
+      subtitle = NULL
+    )
+  ),
+  realtime = list(
+    full_facet = list(
+      title    = "Rolling real-time nowcasts",
+      subtitle = "Quarterly targets and monthly nowcast updates"
+    ),
+    big4 = list(
+      title    = "Rolling real-time nowcasts: DE, FR, IT, ES",
+      subtitle = NULL
+    ),
+    other = list(
+      title    = "Rolling real-time nowcasts: NL, BE, AT, PT",
+      subtitle = NULL
+    ),
+    by_country = lapply(names(rt_plot_variants$plot_by_country), function(cc) {
+      list(
+        title    = paste("Rolling real-time nowcasts:", cc),
+        subtitle = NULL
+      )
+    }),
+    post_covid_8 = list(
+      title    = "Post-COVID rolling real-time nowcasts",
+      subtitle = paste0(
+        "Sample: ",
+        format(
+          min(
+            cross_out$df_rt_all$date[
+              cross_out$df_rt_all$country %in% c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT") &
+                cross_out$df_rt_all$date > params$covid_end
+            ],
+            na.rm = TRUE
+          ),
+          "%b %Y"
+        ),
+        "–",
+        format(
+          max(
+            cross_out$df_rt_all$date[
+              cross_out$df_rt_all$country %in% c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT") &
+                cross_out$df_rt_all$date > params$covid_end
+            ],
+            na.rm = TRUE
+          ),
+          "%b %Y"
+        )
+      )
+    )
+  )
+)
+
+names(graph_titles$realtime$by_country) <- names(rt_plot_variants$plot_by_country)
+
+if (!is.null(rt_plot_variants$plot_post_big4)) {
+  graph_titles$realtime$post_covid_big4 <- list(
+    title    = "Post-COVID rolling real-time nowcasts: DE, FR, IT, ES",
+    subtitle = NULL
+  )
+}
+
+if (!is.null(rt_plot_variants$plot_post_other4)) {
+  graph_titles$realtime$post_covid_other4 <- list(
+    title    = "Post-COVID rolling real-time nowcasts: NL, BE, AT, PT",
+    subtitle = NULL
+  )
+}
+
+# ==============================================================================
+# 9. CROSS-COUNTRY OUTPUTS
 # ==============================================================================
 
 print(cross_out$plot_nowcast_facet)
 print(cross_out$plot_rt_facet)
 
+print(rt_plot_variants$plot_all)
+print(rt_plot_variants$plot_big4)
+print(rt_plot_variants$plot_other4)
+print(rt_plot_variants$plot_post8)
+
+if (!is.null(rt_plot_variants$plot_post_big4)) {
+  print(rt_plot_variants$plot_post_big4)
+}
+
+if (!is.null(rt_plot_variants$plot_post_other4)) {
+  print(rt_plot_variants$plot_post_other4)
+}
+
+if (!is.null(rt_plot_variants$plot_by_country) && length(rt_plot_variants$plot_by_country) > 0L) {
+  invisible(lapply(rt_plot_variants$plot_by_country, print))
+}
+
 cat(cross_out$latex_tab_insample_all)
 cat(cross_out$latex_tab_rt_all)
 
+missing_by_country <- data.frame(
+  country   = names(results_all),
+  n_missing = sapply(names(results_all), function(cc) sum(is.na(results_all[[cc]]$inputs$X))),
+  n_total   = sapply(names(results_all), function(cc) length(results_all[[cc]]$inputs$X))
+) %>%
+  mutate(pct_missing = 100 * n_missing / n_total) %>%
+  arrange(desc(pct_missing))
+
+print(missing_by_country)
+
 # ==============================================================================
-# 9. SAVE CROSS-COUNTRY OUTPUTS
+# 10. SAVE CROSS-COUNTRY OUTPUTS
 # ==============================================================================
 
 path_graph_all <- file.path(path_graph_vec, "ALL_COUNTRIES")
@@ -270,6 +452,10 @@ ggsave(file_graph_rt,   cross_out$plot_rt_facet,      width = 14, height = 8, dp
 writeLines(cross_out$latex_tab_insample_all, con = file_tex_insample)
 writeLines(cross_out$latex_tab_rt_all,       con = file_tex_rt)
 
+# ==============================================================================
+# 11. SAVE SUMMARY OBJECT
+# ==============================================================================
+
 file_summary_cross <- build_result_filename(
   path_out         = path_results_vec,
   model            = model_name,
@@ -304,6 +490,9 @@ saveRDS(
     params                 = params,
     countries              = names(results_all),
     tag_run                = tag_run,
+    missing_by_country     = missing_by_country,
+    
+    graph_titles           = graph_titles,
     
     hyper_by_country       = lapply(summary_all, function(x) list(
       full = x$hyper_full,
@@ -325,6 +514,9 @@ saveRDS(
     tab_rt_all             = cross_out$tab_rt_all,
     latex_tab_rt_all       = cross_out$latex_tab_rt_all,
     
+    rt_plot_variants       = rt_plot_variants,
+    rt_plot_files          = rt_plot_files,
+    
     file_graph_full        = file_graph_full,
     file_graph_rt          = file_graph_rt,
     file_tex_insample      = file_tex_insample,
@@ -334,8 +526,27 @@ saveRDS(
 )
 
 cat("\nSaved cross-country summary to:\n", file_summary_cross, "\n")
-cat("\nCross-country outputs saved to:\n")
+cat("\nSaved cross-country outputs to:\n")
 cat(file_graph_full, "\n")
 cat(file_graph_rt, "\n")
 cat(file_tex_insample, "\n")
 cat(file_tex_rt, "\n")
+
+cat("\nSaved additional real-time plot variants to:\n")
+cat(rt_plot_files$file_graph_rt_all, "\n")
+cat(rt_plot_files$file_graph_rt_big4, "\n")
+cat(rt_plot_files$file_graph_rt_other4, "\n")
+cat(rt_plot_files$file_graph_rt_post8, "\n")
+
+if (!is.null(rt_plot_files$file_graph_rt_post_big4)) {
+  cat(rt_plot_files$file_graph_rt_post_big4, "\n")
+}
+if (!is.null(rt_plot_files$file_graph_rt_post_other4)) {
+  cat(rt_plot_files$file_graph_rt_post_other4, "\n")
+}
+if (!is.null(rt_plot_files$file_graph_rt_by_country) && length(rt_plot_files$file_graph_rt_by_country) > 0L) {
+  for (cc in names(rt_plot_files$file_graph_rt_by_country)) {
+    cat(rt_plot_files$file_graph_rt_by_country[[cc]], "\n")
+  }
+}
+

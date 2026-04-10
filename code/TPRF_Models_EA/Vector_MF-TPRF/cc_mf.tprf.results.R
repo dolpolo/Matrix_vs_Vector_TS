@@ -22,24 +22,48 @@ path_main    <- "C:/Users/david/Desktop/Paper/Matrix_vs_Vector_TS/code"
 path_results <- file.path(path_main, "TPRF_Models_EA/Vector_MF-TPRF/results/outputs")
 path_graph   <- file.path(path_main, "TPRF_Models_EA/Vector_MF-TPRF/results/graph")
 
-country <- "IT"
+country <- "EA"
 
 path_country       <- file.path(path_results, country)
 path_graph_country <- file.path(path_graph, country)
 
+path_graph_factors <- file.path(path_graph_country, "factor_interpretation")
 dir.create(path_graph_country, recursive = TRUE, showWarnings = FALSE)
+dir.create(path_graph_factors, recursive = TRUE, showWarnings = FALSE)
 
 # ==============================================================================
 # 1. TAGS OF THE RUN TO LOAD
 # ==============================================================================
 
-model_name <- "vector_country"
-Size       <- "large"
-sel        <- "corr"
+model_name <- "vector"
+Size       <- "small"
+sel        <- "LASSO"
 
 # ==============================================================================
 # 2. HELPERS
 # ==============================================================================
+
+make_quarter_avg_from_monthly <- function(x, T_q) {
+  x <- as.numeric(x)
+  stopifnot(length(x) >= 3 * T_q)
+  x_use <- x[seq_len(3 * T_q)]
+  as.numeric(tapply(x_use, rep(seq_len(T_q), each = 3), mean))
+}
+
+orient_factor_to_target <- function(f_m, y_q) {
+  T_q <- length(y_q)
+  f_q <- make_quarter_avg_from_monthly(f_m, T_q)
+  
+  if (cor(f_q, y_q, use = "pairwise.complete.obs") < 0) {
+    f_m <- -f_m
+    f_q <- -f_q
+  }
+  
+  list(
+    monthly   = as.numeric(f_m),
+    quarterly = as.numeric(f_q)
+  )
+}
 
 rmsfe_period <- function(mask_q, y_true_q, y_now_in, M_idx) {
   if (!any(mask_q)) return(NA_real_)
@@ -107,6 +131,60 @@ extract_dates_y <- function(obj) {
 extract_params_object <- function(obj) {
   if (!is.null(obj$params)) return(obj$params)
   stop("No params object found in RDS.")
+}
+
+# ==============================================================================
+# 2B. FACTOR HELPERS
+# ==============================================================================
+
+theme_factor_plot <- function(base_size = 13) {
+  theme_minimal(base_size = base_size) +
+    theme(
+      legend.position  = "bottom",
+      panel.grid.minor = element_blank(),
+      strip.text       = element_text(face = "bold"),
+      plot.title       = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle    = element_text(hjust = 0.5, colour = "grey25"),
+      axis.text.x      = element_text(angle = 45, hjust = 1)
+    )
+}
+
+extract_vector_factors <- function(fit_obj) {
+  cand <- list(
+    fit_obj$F_hat,
+    fit_obj$factors$F,
+    fit_obj$F_hf,
+    fit_obj$F,
+    fit_obj$factor,
+    fit_obj$factors
+  )
+  
+  cand <- cand[!vapply(cand, is.null, logical(1))]
+  if (length(cand) == 0L) {
+    stop("No factor object found inside fit_obj.")
+  }
+  
+  Fobj <- cand[[1]]
+  
+  if (is.vector(Fobj)) {
+    Fmat <- matrix(as.numeric(Fobj), ncol = 1)
+    colnames(Fmat) <- "F1"
+    return(Fmat)
+  }
+  
+  if (is.matrix(Fobj)) {
+    Fmat <- Fobj
+    if (nrow(Fmat) < ncol(Fmat)) {
+      Fmat <- t(Fmat)
+    }
+    Fmat <- as.matrix(Fmat)
+    if (is.null(colnames(Fmat))) {
+      colnames(Fmat) <- paste0("F", seq_len(ncol(Fmat)))
+    }
+    return(Fmat)
+  }
+  
+  stop("Factor object found, but its structure is not supported.")
 }
 
 # ==============================================================================
@@ -190,6 +268,196 @@ df_quarterly <- data.frame(
   date   = dates_q,
   y_true = y_true_q
 )
+
+# ==============================================================================
+# 5B. VECTOR FACTOR INTERPRETATION
+# ==============================================================================
+
+title_factors_vec    <- "Estimated latent factor"
+subtitle_factors_vec <- "MF-TPRF on EA data"
+
+F_vec <- extract_vector_factors(fit_obj)
+
+T_fac <- nrow(F_vec)
+dates_f_vec <- dates_m[seq_len(T_fac)]
+
+df_factors_vec <- as.data.frame(F_vec)
+df_factors_vec$date <- as.Date(dates_f_vec)
+
+df_factors_vec <- df_factors_vec %>%
+  pivot_longer(
+    cols = -date,
+    names_to = "factor",
+    values_to = "value"
+  )
+
+plot_factors_vec <- ggplot(df_factors_vec, aes(x = date, y = value)) +
+  annotate(
+    "rect",
+    xmin = covid_start, xmax = covid_end,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey70", alpha = 0.16
+  ) +
+  geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey70") +
+  geom_line(linewidth = 0.8, colour = "black") +
+  facet_wrap(~ factor, ncol = 1, scales = "free_y") +
+  labs(
+    title = title_factors_vec,
+    subtitle = subtitle_factors_vec,
+    x = "Date",
+    y = "Factor value"
+  ) +
+  theme_factor_plot()
+
+print(plot_factors_vec)
+
+# ==============================================================================
+# 5C. PCA FACTOR ON EA DATA
+# ==============================================================================
+
+title_pca1    <- "First principal component"
+subtitle_pca1 <- "PCA on imputed EA monthly predictors"
+
+if (is.null(fit_res$preprocessing$X_xp)) {
+  stop("X_xp not found in fit_res$preprocessing.")
+}
+
+X_xp <- as.matrix(fit_res$preprocessing$X_xp)
+
+pca_fit <- prcomp(X_xp, center = TRUE, scale. = FALSE)
+
+pca1 <- as.numeric(pca_fit$x[, 1])
+
+df_pca1 <- data.frame(
+  date  = as.Date(dates_m[seq_len(length(pca1))]),
+  value = pca1
+)
+
+plot_pca1 <- ggplot(df_pca1, aes(x = date, y = value)) +
+  annotate(
+    "rect",
+    xmin = covid_start, xmax = covid_end,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey70", alpha = 0.16
+  ) +
+  geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey70") +
+  geom_line(linewidth = 0.8, colour = "black") +
+  labs(
+    title = title_pca1,
+    subtitle = subtitle_pca1,
+    x = "Date",
+    y = "PC1 value"
+  ) +
+  theme_factor_plot()
+
+print(plot_pca1)
+
+# ==============================================================================
+# 5D. COMPARISON: VECTOR FACTOR VS PCA1
+# ==============================================================================
+
+title_compare    <- "Estimated factor vs first principal component"
+subtitle_compare <- "Standardized series, sign-aligned to EA GDP"
+
+f_vec_1 <- as.numeric(F_vec[, 1])
+
+f_vec_q  <- make_quarter_avg_from_monthly(f_vec_1, length(y_true_q))
+pca1_q   <- make_quarter_avg_from_monthly(pca1,    length(y_true_q))
+
+if (cor(f_vec_q, y_true_q, use = "pairwise.complete.obs") < 0) {
+  f_vec_1 <- -f_vec_1
+  f_vec_q <- -f_vec_q
+}
+
+if (cor(pca1_q, y_true_q, use = "pairwise.complete.obs") < 0) {
+  pca1 <- -pca1
+  pca1_q <- -pca1_q
+}
+
+df_compare <- data.frame(
+  date    = as.Date(dates_m[seq_len(length(f_vec_1))]),
+  MF_TPRF = as.numeric(scale(f_vec_1)),
+  PCA1    = as.numeric(scale(pca1))
+) %>%
+  pivot_longer(
+    cols = c("MF_TPRF", "PCA1"),
+    names_to = "series",
+    values_to = "value"
+  )
+
+plot_compare <- ggplot(df_compare, aes(x = date, y = value, colour = series)) +
+  annotate(
+    "rect",
+    xmin = covid_start, xmax = covid_end,
+    ymin = -Inf, ymax = Inf,
+    fill = "grey70", alpha = 0.16
+  ) +
+  geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey70") +
+  geom_line(linewidth = 0.9) +
+  labs(
+    title = title_compare,
+    subtitle = subtitle_compare,
+    x = "Date",
+    y = "Standardized value",
+    colour = ""
+  ) +
+  theme_factor_plot()
+
+print(plot_compare)
+
+# ==============================================================================
+# 5E. FACTORS TO SAVE FOR FINAL CROSS-MODEL COMPARISON
+# ==============================================================================
+
+factor_vector_monthly_raw <- as.numeric(F_vec[, 1])
+
+factor_vector_oriented <- orient_factor_to_target(
+  f_m = factor_vector_monthly_raw,
+  y_q = y_true_q
+)
+
+factor_vector_monthly   <- factor_vector_oriented$monthly
+factor_vector_quarterly <- factor_vector_oriented$quarterly
+
+pca1_oriented <- orient_factor_to_target(
+  f_m = pca1,
+  y_q = y_true_q
+)
+
+pca1_monthly_oriented <- pca1_oriented$monthly
+pca1_quarterly        <- pca1_oriented$quarterly
+
+dates_factor_m <- as.Date(dates_m[seq_len(length(factor_vector_monthly))])
+dates_factor_q <- as.Date(dates_q)
+
+df_factor_compare_vector_q <- data.frame(
+  date   = dates_factor_q,
+  GDP    = as.numeric(y_true_q),
+  Vector = factor_vector_quarterly,
+  PCA1   = pca1_quarterly
+)
+
+file_graph_factor_vec <- file.path(
+  path_graph_factors,
+  paste0("plot_factors_vector_mf_tprf_", country,
+         "_Size-", Size, "_sel-", sel, ".png")
+)
+
+file_graph_pca1 <- file.path(
+  path_graph_factors,
+  paste0("plot_pca1_", country,
+         "_Size-", Size, "_sel-", sel, ".png")
+)
+
+file_graph_compare <- file.path(
+  path_graph_factors,
+  paste0("plot_compare_factor_vs_pca1_", country,
+         "_Size-", Size, "_sel-", sel, ".png")
+)
+
+ggsave(file_graph_factor_vec, plot_factors_vec, width = 10, height = 6, dpi = 300)
+ggsave(file_graph_pca1,       plot_pca1,        width = 10, height = 4.8, dpi = 300)
+ggsave(file_graph_compare,    plot_compare,     width = 10, height = 5.2, dpi = 300)
 
 # ==============================================================================
 # 6. FULL-SAMPLE PLOT
@@ -282,6 +550,15 @@ latex_insample <- latex_table_periods(
 )
 
 cat("\n", latex_insample, "\n")
+
+tab_insample_all <- data.frame(
+  country = country,
+  period  = rownames(rmsfe_insample),
+  M1      = rmsfe_insample[, "M1"],
+  M2      = rmsfe_insample[, "M2"],
+  M3      = rmsfe_insample[, "M3"],
+  row.names = NULL
+)
 
 # ==============================================================================
 # 8. SAVE FULL-SAMPLE GRAPH
@@ -468,6 +745,15 @@ latex_rt <- latex_table_periods(
 
 cat("\n", latex_rt, "\n")
 
+tab_rt_all <- data.frame(
+  country = country,
+  period  = rownames(rmsfe_rt),
+  M1      = rmsfe_rt[, "M1"],
+  M2      = rmsfe_rt[, "M2"],
+  M3      = rmsfe_rt[, "M3"],
+  row.names = NULL
+)
+
 # ==============================================================================
 # 13. SAVE PSEUDO REAL-TIME GRAPH
 # ==============================================================================
@@ -514,6 +800,37 @@ summary_vector_out <- list(
   country         = country,
   params_fit      = params,
   params_rt       = params_rt,
+  
+  factor_interpretation = list(
+    df_factors_vec        = df_factors_vec,
+    df_pca1               = df_pca1,
+    df_compare            = df_compare,
+    plot_factors_vec      = plot_factors_vec,
+    plot_pca1             = plot_pca1,
+    plot_compare          = plot_compare,
+    file_graph_factor_vec = file_graph_factor_vec,
+    file_graph_pca1       = file_graph_pca1,
+    file_graph_compare    = file_graph_compare
+  ),
+  
+  factor_comparison = list(
+    dates_m = dates_factor_m,
+    dates_q = dates_factor_q,
+    gdp_q   = as.numeric(y_true_q),
+    
+    vector_factor_monthly   = factor_vector_monthly,
+    vector_factor_quarterly = factor_vector_quarterly,
+    
+    pca1_monthly   = pca1_monthly_oriented,
+    pca1_quarterly = pca1_quarterly,
+    
+    vector_factor_name = "Vector MF-TPRF",
+    pca1_name          = "PCA1",
+    
+    df_q = df_factor_compare_vector_q
+  ),
+  
+  # original fields
   df_now_full     = df_now_full,
   df_quarterly    = df_quarterly,
   plot_nowcast    = plot_nowcast,
@@ -527,7 +844,17 @@ summary_vector_out <- list(
   file_fit        = file_fit,
   file_rt         = file_rt,
   file_graph_fit  = file_graph_fit,
-  file_graph_rt   = file_graph_rt
+  file_graph_rt   = file_graph_rt,
+  
+  # aliases for compatibility with final script
+  plot_nowcast_facet     = plot_nowcast,
+  plot_rt_facet          = plot_rt,
+  tab_insample_all       = tab_insample_all,
+  tab_rt_all             = tab_rt_all,
+  df_rt_all              = df_rt,
+  df_yq_eval_all         = df_yq_eval,
+  latex_tab_insample_all = latex_insample,
+  latex_tab_rt_all       = latex_rt
 )
 
 file_summary <- build_result_filename(

@@ -106,9 +106,9 @@ params <- list(
   
   target       = "GDP",
   
-  sel_method   = "corr",
-  n_m          = 30,
-  n_q          = 30,
+  sel_method   = "LASSO",
+  n_m          = 20,
+  n_q          = 5,
   thr_m        = 0.10,
   thr_q        = 0.85,
   thr_F_test   = 0.01,
@@ -126,11 +126,11 @@ params <- list(
   nw_lag       = 1
 )
 
-countries <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
-country   <- "IT"
+countries <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
+country   <- "EA"
 
 tag_run    <- build_run_tag(params)
-model_name <- "vector_country"
+model_name <- "vector"
 sel        <- params$sel_method
 
 # ==============================================================================
