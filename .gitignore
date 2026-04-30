@@ -5,6 +5,10 @@
 # Data
 code/data/
 
+
+# DFM
+code/TPRF_Models_EA/Vector_DFM/results"
+
 # Vector MF-TPRF
 code/TPRF_Models_EA/Vector_MF-TPRF/results/
 
