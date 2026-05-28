@@ -47,8 +47,8 @@ params <- list(
   covid_end   = as.Date("2021-07-01")
 )
 
-Size <- "medium"   # "small" | "medium" | "large"
-sel  <- "corr"   # "corr"  | "LASSO"
+Size <- "small"   # "small" | "medium" | "large"
+sel  <- "LASSO"   # "corr"  | "LASSO"
 
 model_matrix    <- "matrix"
 model_vector    <- "vector"
@@ -975,6 +975,8 @@ ggsave(
 # ------------------------------------------------------------------------------
 
 countries_focus <- c("DE", "FR", "IT", "ES")
+# countries_focus <- c("NL", "BE", "AT", "PT")
+
 
 df_multi_all <- dplyr::bind_rows(
   extract_country_rt_multi(summary_matrix$df_rt_all,    countries_focus, label_matrix),
@@ -1026,7 +1028,7 @@ plot_multi_models_facet <- ggplot() +
     alpha = 0.99,
     lineend = "round"
   ) +
-  facet_grid(country ~ type, scales = "fixed") +
+  facet_grid(country ~ type, scales = "free_y") +
   scale_color_manual(values = model_colors, breaks = model_levels, name = NULL) +
   scale_linetype_manual(values = model_linetypes, breaks = model_levels, name = NULL) +
   scale_x_date(
@@ -1056,8 +1058,8 @@ file_multi_png <- file.path(
 ggsave(
   filename = file_multi_png,
   plot     = plot_multi_models_facet,
-  width    = 12.4,
-  height   = 2.5 + 1.80 * length(countries_focus),
+  width    = 11.5,
+  height   = 7.2,
   dpi      = 600,
   bg       = "white"
 )
