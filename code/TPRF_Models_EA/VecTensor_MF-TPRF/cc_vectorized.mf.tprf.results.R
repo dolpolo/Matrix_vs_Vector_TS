@@ -24,7 +24,7 @@ path_results <- file.path(path_main, "TPRF_Models_EA/VecTensor_MF-TPRF/results/o
 path_graph   <- file.path(path_main, "TPRF_Models_EA/VecTensor_MF-TPRF/results/graph_vec")
 
 
-country <- "IT"
+country <- "AT"
 
 path_country       <- file.path(path_results, country)
 path_graph_country <- file.path(path_graph, country)
@@ -36,8 +36,8 @@ dir.create(path_graph_country, recursive = TRUE, showWarnings = FALSE)
 # ==============================================================================
 
 model_name <- "vectensor_country"
-Size       <- "large"
-sel        <- "corr"
+Size       <- "small"
+sel        <- "LASSO"
 
 # ==============================================================================
 # 2. HELPERS
@@ -123,6 +123,9 @@ extract_params_object <- function(obj) {
 # ==============================================================================
 # 3. LOAD FULL-SAMPLE RESULTS
 # ==============================================================================
+
+path_func_vec <- file.path(path_main, "functions/functions_vec")
+source(file.path(path_func_vec, "mf.tprf.utils.R"))
 
 file_fit <- find_result_file(
   path  = path_country,

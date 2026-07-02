@@ -255,7 +255,7 @@ estimate_country_dfm <- function(country_inputs, params) {
 # 3. PSEUDO REAL-TIME NOWCASTING
 # ==============================================================================
 
-run_country_dfm_rt <- function(country_inputs, params) {
+run_country_dfm_rt <- function(regime_data_pre, regime_data_post, params) {
   
   user_hyper_pre <- if (is_q0_spec(params)) {
     list(r = NULL, p = NULL, q = 0L)
@@ -263,22 +263,12 @@ run_country_dfm_rt <- function(country_inputs, params) {
     list(r = NULL, p = NULL, q = NULL)
   }
   
-  user_hyper_post <- if (is_q0_spec(params)) {
-    list(r = NULL, p = NULL, q = 0L)
-  } else {
-    list(r = NULL, p = NULL, q = NULL)
-  }
+  user_hyper_post <- user_hyper_pre
   
   rt_raw <- pseudo_realtime_DFM_EM_reestimate(
-    X_full   = country_inputs$X_full,
-    NQ       = country_inputs$N_q,
-    params   = params,
-    dates_m  = country_inputs$dates_m,
-    dates_q  = country_inputs$dates_q,
-    Freq     = country_inputs$freq,
-    Unb      = country_inputs$unb,
-    gdp_col  = country_inputs$gdp_col,
-    agg      = country_inputs$agg,
+    regime_data_pre  = regime_data_pre,
+    regime_data_post = regime_data_post,
+    params           = params,
     do_post_covid_recalibration = TRUE,
     user_hyper_pre  = user_hyper_pre,
     user_hyper_post = user_hyper_post,
@@ -299,43 +289,18 @@ run_country_dfm_rt <- function(country_inputs, params) {
     df_rt <- dplyr::arrange(df_rt, date, month_in_quarter)
   }
   
-  rolling_to_df <- function(now_obj) {
-    make_df <- function(x, label, scale) {
-      if (length(x) == 0) return(NULL)
-      data.frame(
-        date    = as.Date(names(x)),
-        value   = as.numeric(x),
-        vintage = label,
-        scale   = scale,
-        row.names = NULL
-      )
-    }
-    
-    dplyr::bind_rows(
-      make_df(now_obj$M1_std,  "M1", "std"),
-      make_df(now_obj$M2_std,  "M2", "std"),
-      make_df(now_obj$M3_std,  "M3", "std"),
-      make_df(now_obj$M1_orig, "M1", "orig"),
-      make_df(now_obj$M2_orig, "M2", "orig"),
-      make_df(now_obj$M3_orig, "M3", "orig")
-    )
-  }
-  
-  list(
-    raw  = rt_raw,
-    M1   = df_M1,
-    M2   = df_M2,
-    M3   = df_M3,
-    all  = df_rt,
-    long = rolling_to_df(rt_raw)
-  )
+  list(raw = rt_raw, M1 = df_M1, M2 = df_M2, M3 = df_M3, all = df_rt)
 }
 
 # ==============================================================================
 # 4. COUNTRY WRAPPER
 # ==============================================================================
 
-run_country_dfm <- function(country_inputs, params, path_results = NULL) {
+run_country_dfm <- function(country_inputs,
+                            regime_data_pre,
+                            regime_data_post,
+                            params,
+                            path_results = NULL) {
   
   win <- get_country_eval_windows(country_inputs, params)
   
@@ -349,33 +314,24 @@ run_country_dfm <- function(country_inputs, params, path_results = NULL) {
   params_rt$end_eval <- params_cc$end_eval_rt
   
   est <- estimate_country_dfm(country_inputs, params_cc)
-  rt  <- run_country_dfm_rt(country_inputs, params_rt)
+  rt  <- run_country_dfm_rt(regime_data_pre, regime_data_post, params_rt)
   
   out <- list(
-    model_id        = "DFM_EM",
-    country         = country_inputs$country,
-    params          = params_cc,
-    inputs          = country_inputs,
-    full_sample     = est,
-    pseudo_realtime = rt
+    model_id         = "DFM_EM",
+    country          = country_inputs$country,
+    params           = params_cc,
+    inputs           = country_inputs,
+    regime_data_pre  = regime_data_pre,
+    regime_data_post = regime_data_post,
+    full_sample      = est,
+    pseudo_realtime  = rt
   )
   
   if (!is.null(path_results)) {
     dir.create(file.path(path_results, country_inputs$country), recursive = TRUE, showWarnings = FALSE)
-    
-    file_country <- file.path(
-      path_results,
-      country_inputs$country,
-      paste0(
-        "DFM_ALL_",
-        country_inputs$country,
-        "_Idio-",
-        get_idio_spec(params_cc),
-        ".rds"
-      )
-    )
-    
-    saveRDS(out, file_country)
+    saveRDS(out, file.path(path_results, country_inputs$country,
+                           paste0("DFM_ALL_", country_inputs$country,
+                                  "_Idio-", get_idio_spec(params_cc), ".rds")))
   }
   
   out
@@ -385,33 +341,59 @@ run_country_dfm <- function(country_inputs, params, path_results = NULL) {
 # 5. CROSS-COUNTRY WRAPPERS
 # ==============================================================================
 
-run_all_countries_dfm <- function(countries, all_countries, params, path_results = NULL) {
+run_all_countries_dfm <- function(countries,
+                                  all_countries,
+                                  all_countries_rt_pre,
+                                  all_countries_rt_post,
+                                  selection_end_pre,
+                                  selection_end_post,
+                                  params,
+                                  path_results = NULL,
+                                  parallel = TRUE) {
   
-  results <- vector("list", length(countries))
-  names(results) <- countries
-  
-  for (cc in countries) {
+  run_one_country <- function(cc) {
     cat("\n==============================\n")
     cat("Running DFM country:", cc, "\n")
     cat("Idiosyncratic specification:", get_idio_spec(params), "\n")
     cat("==============================\n")
     
-    country_inputs <- prepare_country_inputs_dfm(
-      all_countries = all_countries,
-      country       = cc,
-      params        = params
+    country_inputs <- prepare_country_inputs_dfm(all_countries, cc, params)
+    
+    regime_data_pre <- make_dfm_regime_data(
+      all_countries  = all_countries_rt_pre,
+      country        = cc,
+      label          = "pre_evaluation_selection",
+      selection_end  = selection_end_pre
     )
     
-    results[[cc]] <- run_country_dfm(
-      country_inputs = country_inputs,
-      params         = params,
-      path_results   = path_results
+    regime_data_post <- make_dfm_regime_data(
+      all_countries  = all_countries_rt_post,
+      country        = cc,
+      label          = "post_covid_selection",
+      selection_end  = selection_end_post
     )
+    
+    out <- run_country_dfm(
+      country_inputs   = country_inputs,
+      regime_data_pre  = regime_data_pre,
+      regime_data_post = regime_data_post,
+      params           = params,
+      path_results     = path_results
+    )
+    
+    cat("\nCompleted DFM country:", cc, "\n")
+    out
   }
   
+  if (isTRUE(parallel)) {
+    results <- future.apply::future_lapply(countries, run_one_country)
+  } else {
+    results <- lapply(countries, run_one_country)
+  }
+  
+  names(results) <- countries
   results
 }
-
 # ==============================================================================
 # 6. COUNTRY SUMMARY OBJECTS
 # ==============================================================================

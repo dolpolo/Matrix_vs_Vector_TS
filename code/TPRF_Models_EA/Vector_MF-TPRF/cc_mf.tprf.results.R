@@ -37,7 +37,7 @@ dir.create(path_graph_factors, recursive = TRUE, showWarnings = FALSE)
 
 model_name <- "vector"
 Size       <- "small"
-sel        <- "LASSO"
+sel        <- "corr"
 
 # ==============================================================================
 # 2. HELPERS

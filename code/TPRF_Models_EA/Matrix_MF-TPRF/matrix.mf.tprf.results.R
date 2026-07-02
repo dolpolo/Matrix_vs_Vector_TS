@@ -52,12 +52,27 @@ source(file.path(path_func, "matrix.mf.tprf.utils.R"))
 # 1. RUN IDENTIFIERS
 # ==============================================================================
 
-model_name <- "matrix"
-Size       <- "small"   # "small" | "medium" | "large"
+proxy_mode <- "scalar"   # "scalar" | "multivariate"
+Size       <- "small"    # "small" | "medium" | "large"
 sel        <- "LASSO"    # "corr" | "LASSO"
 
-country_order <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
+model_name <- paste0("matrix_", proxy_mode)
 
+# Old fixed-rank appendix result already available on disk.
+model_name_fixed <- "matrix"
+
+run_id <- paste(proxy_mode, Size, sel, sep = "_")
+
+proxy_label <- switch(
+  proxy_mode,
+  scalar = "Scalar EA-residual proxy",
+  multivariate = "Multivariate national-GDP proxy"
+)
+
+country_order <- c(
+  "DE", "FR", "IT", "ES",
+  "NL", "BE", "AT", "PT", "EA"
+)
 # ==============================================================================
 # 2. GRAPH HELPERS
 # ==============================================================================
@@ -104,6 +119,30 @@ scale_x_yearly <- function(date_vec) {
 }
 
 # ==============================================================================
+# SAVE FIGURES FOR LATEX
+# ==============================================================================
+
+save_plot_latex <- function(
+    filename,
+    plot,
+    width = 7,
+    height = 4.5,
+    dpi = 180,
+    bg = "white"
+) {
+  ggplot2::ggsave(
+    filename = filename,
+    plot     = plot,
+    width    = width,
+    height   = height,
+    dpi      = dpi,
+    bg       = bg,
+    units    = "in",
+    limitsize = FALSE
+  )
+}
+
+# ==============================================================================
 # 3. LOAD RESULTS
 # ==============================================================================
 
@@ -123,9 +162,10 @@ file_rt <- find_result_file(
   sel   = sel
 )
 
+# Fixed-rank appendix remains the pre-existing benchmark.
 file_fit_fixed <- find_result_file(
   path  = path_results,
-  model = model_name,
+  model_name_fixed <- model_name,
   stage = "fit_fixed",
   Size  = Size,
   sel   = sel
@@ -141,93 +181,152 @@ fit_obj_fixed <- if (!is.null(res_fit_fixed$fit)) {
   res_fit_fixed
 }
 
+if (is.null(res_fit$proxy_mode) || is.null(res_rt$proxy_mode)) {
+  stop("The selected fit or real-time result does not contain proxy_mode.")
+}
+
+if (!identical(as.character(res_fit$proxy_mode), proxy_mode)) {
+  stop(
+    "Full-sample result proxy mode does not match the selected proxy mode. ",
+    "Requested: ", proxy_mode,
+    " | Loaded: ", res_fit$proxy_mode
+  )
+}
+
+if (!identical(as.character(res_rt$proxy_mode), proxy_mode)) {
+  stop(
+    "Real-time result proxy mode does not match the selected proxy mode. ",
+    "Requested: ", proxy_mode,
+    " | Loaded: ", res_rt$proxy_mode
+  )
+}
+
 cat("\nLoaded full-sample results from:\n", file_fit, "\n")
 cat("\nLoaded pseudo real-time results from:\n", file_rt, "\n")
-cat("\nLoaded fixed-rank full-sample results from:\n", file_fit_fixed, "\n")
+cat("\nLoaded fixed-rank appendix results from:\n", file_fit_fixed, "\n")
 
-# overwrite identifiers from saved objects when available
-model_name <- if (!is.null(res_fit$model)) res_fit$model else model_name
-Size       <- if (!is.null(res_fit$Size))  res_fit$Size  else Size
-sel        <- if (!is.null(res_fit$sel))   res_fit$sel   else sel
+model_name <- as.character(res_fit$model)
+proxy_mode <- as.character(res_fit$proxy_mode)
+Size       <- as.character(res_fit$Size)
+sel        <- as.character(res_fit$sel)
+
+run_id <- paste(proxy_mode, Size, sel, sep = "_")
+
+proxy_label <- switch(
+  proxy_mode,
+  scalar = "Scalar EA-residual proxy",
+  multivariate = "Multivariate national-GDP proxy"
+)
+
+
+hyper_fit_fixed <- list(
+  fixed_r = fit_obj_fixed$r_selected,
+  Lproxy = if (!is.null(fit_obj_fixed$meta$Lproxy)) {
+    fit_obj_fixed$meta$Lproxy
+  } else {
+    NA_integer_
+  },
+  L_midas = if (!is.null(fit_obj_fixed$meta$L_midas)) {
+    fit_obj_fixed$meta$L_midas
+  } else {
+    NA_integer_
+  },
+  p_ar = if (!is.null(fit_obj_fixed$meta$p_AR)) {
+    fit_obj_fixed$meta$p_AR
+  } else {
+    NA_integer_
+  },
+  r_selected = fit_obj_fixed$r_selected
+)
 
 # ==============================================================================
 # 4. EXTRACT CORE OBJECTS
 # ==============================================================================
 
-params  <- res_fit$params
-tensor  <- res_fit$tensor
+required_fit_fields <- c(
+  "params",
+  "dates_m",
+  "dates_q",
+  "target",
+  "metadata",
+  "selections",
+  "hyper",
+  "fit"
+)
 
-df_selection      <- res_fit$selections
-df_selection_wide <- res_fit$selections_wide
-sel_raw           <- res_fit$sel_raw
+missing_fit_fields <- setdiff(required_fit_fields, names(res_fit))
+
+if (length(missing_fit_fields) > 0L) {
+  stop(
+    "The full-sample result is missing: ",
+    paste(missing_fit_fields, collapse = ", ")
+  )
+}
+
+params <- res_fit$params
+
+df_selection      <- res_fit$selections$table
+df_selection_wide <- res_fit$selections$wide
+sel_raw           <- res_fit$selections$raw
 na_pct            <- res_fit$na_pct
 
-fit_obj <- if (!is.null(res_fit$fit)) {
-  res_fit$fit
-} else if (!is.null(res_fit$Tensor_MF_TPRF)) {
-  res_fit$Tensor_MF_TPRF
-} else {
-  stop("No full-sample fit object found in res_fit.")
+fit_obj <- res_fit$fit
+
+if (is.null(fit_obj$by_country)) {
+  stop("fit_obj$by_country is missing.")
 }
 
 countries_fit  <- names(fit_obj$by_country)
 countries_eval <- intersect(country_order, countries_fit)
 
-hyper_fit <- if (!is.null(res_fit$hyper)) {
-  res_fit$hyper
-} else {
-  list(
-    Lproxy     = res_fit$Lproxy,
-    L_midas    = res_fit$L_midas,
-    p_ar       = res_fit$p_ar,
-    r_selected = res_fit$r_selected
-  )
+if (length(countries_eval) == 0L) {
+  stop("No country-specific forecasts found in fit_obj$by_country.")
 }
+
+hyper_fit <- res_fit$hyper
 
 Lproxy  <- hyper_fit$Lproxy
 L_midas <- hyper_fit$L_midas
 p_ar    <- hyper_fit$p_ar
-r1      <- if (!is.null(hyper_fit$r_selected)) hyper_fit$r_selected[1] else NA
-r2      <- if (!is.null(hyper_fit$r_selected)) hyper_fit$r_selected[2] else NA
 
-N_m <- if (!is.null(res_fit$metadata$N_m)) res_fit$metadata$N_m else NA
-N_q <- if (!is.null(res_fit$metadata$N_q)) res_fit$metadata$N_q else NA
+r_selected_fit <- hyper_fit$r_selected_fit
 
-# optional fixed-rank hyper extraction
-hyper_fit_fixed <- if (!is.null(res_fit_fixed$hyper)) {
-  res_fit_fixed$hyper
-} else {
-  list(
-    fixed_r    = if (!is.null(res_fit_fixed$fixed_r)) res_fit_fixed$fixed_r else NULL,
-    Lproxy     = if (!is.null(res_fit_fixed$Lproxy)) res_fit_fixed$Lproxy else NA,
-    L_midas    = if (!is.null(res_fit_fixed$L_midas)) res_fit_fixed$L_midas else NA,
-    p_ar       = if (!is.null(res_fit_fixed$p_ar)) res_fit_fixed$p_ar else NA,
-    r_selected = if (!is.null(fit_obj_fixed$r_selected)) fit_obj_fixed$r_selected else NULL
-  )
+if (is.null(r_selected_fit)) {
+  r_selected_fit <- fit_obj$r_selected
 }
 
+r1 <- r_selected_fit[1]
+r2 <- r_selected_fit[2]
+
+N_m <- res_fit$metadata$N_m
+N_q <- res_fit$metadata$N_q
+N   <- res_fit$metadata$N
+
+proxy_columns <- res_fit$proxy$columns
 # ==============================================================================
 # 5. TRUE QUARTERLY GDP
 # ==============================================================================
 
-Y_tens  <- tensor$Y
-gdp_col <- tensor$target_col
-dates_m <- as.Date(dimnames(Y_tens)[[1]])
+dates_m <- as.Date(res_fit$dates_m)
+dates_q <- as.Date(res_fit$dates_q)
 
-gdp_tens <- Y_tens[, , gdp_col, drop = FALSE]
-gdp_mat  <- matrix(
-  gdp_tens[, , 1, drop = TRUE],
-  nrow = dim(gdp_tens)[1],
-  ncol = dim(gdp_tens)[2]
-)
-colnames(gdp_mat) <- dimnames(Y_tens)[[2]]
+y_q_all_saved <- as.matrix(res_fit$target$y_q_all)
 
-idx_q   <- which(rowSums(!is.na(gdp_mat)) > 0)
-dates_q <- dates_m[idx_q]
+if (!all(countries_eval %in% colnames(y_q_all_saved))) {
+  stop("Some country GDP series are missing from res_fit$target$y_q_all.")
+}
 
-y_true_q_all <- gdp_mat[idx_q, countries_eval, drop = FALSE]
+y_true_q_all <- y_q_all_saved[
+  ,
+  countries_eval,
+  drop = FALSE
+]
+
 T_q_complete <- nrow(y_true_q_all)
 
+if (length(dates_q) != T_q_complete) {
+  stop("dates_q and y_true_q_all have incompatible dimensions.")
+}
 # ==============================================================================
 # 6. FULL-SAMPLE MONTHLY NOWCAST
 # ==============================================================================
@@ -258,6 +357,62 @@ period_vec <- factor(period_vec, levels = c("in-sample", "real-time"))
 M1_idx <- seq(1, n_in, by = 3)
 M2_idx <- seq(2, n_in, by = 3)
 M3_idx <- seq(3, n_in, by = 3)
+
+# ==============================================================================
+# 6B. FULL-SAMPLE AGGREGATE EA FIT
+# ==============================================================================
+
+if (!is.null(fit_obj$aggregate)) {
+  
+  if (is.null(fit_obj$aggregate$y_nowcast)) {
+    stop("fit_obj$aggregate exists but y_nowcast is missing.")
+  }
+  
+  y_now_EA_full <- as.numeric(fit_obj$aggregate$y_nowcast)
+  T_m_EA_full   <- length(y_now_EA_full)
+  
+  dates_m_EA_full <- dates_m[seq_len(T_m_EA_full)]
+  
+  # True EA quarterly target used in the saved object
+  y_EA_true_q <- as.numeric(res_fit$target$y_q_all[, "EA"])
+  
+  if (length(y_EA_true_q) != length(dates_q)) {
+    stop("Length mismatch between EA quarterly target and dates_q.")
+  }
+  
+  n_in_EA <- 3 * length(y_EA_true_q)
+  if (T_m_EA_full < n_in_EA) {
+    stop("Not enough months in aggregate EA fit: T_m_EA_full < 3*T_q.")
+  }
+  
+  period_EA_vec <- rep("in-sample", T_m_EA_full)
+  if (T_m_EA_full > n_in_EA) {
+    period_EA_vec[(n_in_EA + 1):T_m_EA_full] <- "real-time"
+  }
+  period_EA_vec <- factor(period_EA_vec, levels = c("in-sample", "real-time"))
+  
+  df_now_EA_full <- data.frame(
+    date       = dates_m_EA_full,
+    country    = "EA",
+    y_now_full = y_now_EA_full,
+    period     = period_EA_vec
+  )
+  
+  df_quarterly_EA <- data.frame(
+    date   = dates_q,
+    country = "EA",
+    y_true = y_EA_true_q
+  )
+  
+} else {
+  
+  warning(
+    "fit_obj$aggregate is NULL. To plot aggregate EA fit, rerun Tensor_MF_TPRF with forecast_mode = 'aggregate' or 'both'."
+  )
+  
+  df_now_EA_full <- NULL
+  df_quarterly_EA <- NULL
+}
 
 # ==============================================================================
 # 7. PERIOD MASKS
@@ -604,25 +759,24 @@ df_factor_compare_matrix_q <- data.frame(
 # ------------------------------------------------------------------------------
 # 10.5 Save baseline factor figures
 # ------------------------------------------------------------------------------
-
 file_graph_factors_base <- file.path(
   path_fig_factors,
-  paste0("plot_factors_baseline_Size-", Size, "_sel-", sel, ".png")
+  paste0("plot_factors_", run_id, ".png")
 )
 
 file_graph_C_base <- file.path(
   path_fig_factors,
-  paste0("plot_column_loadings_baseline_allvars_Size-", Size, "_sel-", sel, ".png")
+  paste0("plot_column_loadings_", run_id, ".png")
 )
 
 file_graph_corr_base <- file.path(
   path_fig_factors,
-  paste0("plot_factor_gdp_corr_baseline_oos_M123_Size-", Size, "_sel-", sel, ".png")
+  paste0("plot_factor_gdp_corr_", run_id, ".png")
 )
 
-ggsave(file_graph_factors_base, plot_factors_base, width = 11, height = 6,  dpi = 300)
-ggsave(file_graph_C_base,       plot_C_base,       width = 8,  height = 10, dpi = 300)
-ggsave(file_graph_corr_base,    plot_corr_base,    width = 11, height = 5,  dpi = 300)
+save_plot_latex(file_graph_factors_base, plot_factors_base, width = 8, height = 4.5, dpi = 180)
+save_plot_latex(file_graph_C_base,       plot_C_base,       width = 7, height = 8.0, dpi = 200)
+save_plot_latex(file_graph_corr_base,    plot_corr_base,    width = 8, height = 4.0, dpi = 180)
 
 # ==============================================================================
 # 11. FIXED-RANK APPENDIX: r1 = 2, r2 = 3
@@ -804,9 +958,9 @@ file_graph_corr_fixed <- file.path(
   paste0("plot_factor_gdp_corr_fixed_oos_M123_r1-2_r2-3_Size-", Size, "_sel-", sel, ".png")
 )
 
-ggsave(file_graph_factors_fixed, plot_factors_fixed, width = 11, height = 7,  dpi = 300)
-ggsave(file_graph_C_fixed,       plot_C_fixed,       width = 8,  height = 10, dpi = 300)
-ggsave(file_graph_corr_fixed,    plot_corr_fixed,    width = 11, height = 5,  dpi = 300)
+save_plot_latex(file_graph_factors_fixed, plot_factors_fixed, width = 8, height = 5.0, dpi = 180)
+save_plot_latex(file_graph_C_fixed,       plot_C_fixed,       width = 7, height = 8.0, dpi = 200)
+save_plot_latex(file_graph_corr_fixed,    plot_corr_fixed,    width = 8, height = 4.0, dpi = 180)
 
 cat("\nSaved factor interpretation graphs.\n")
 cat("Baseline factor figures saved in:\n", path_fig_factors, "\n")
@@ -862,6 +1016,78 @@ plot_nowcast <- ggplot() +
 print(plot_nowcast)
 
 # ==============================================================================
+# 12B. FULL-SAMPLE PLOT: AGGREGATE EA
+# ==============================================================================
+
+if (!is.null(df_now_EA_full) && !is.null(df_quarterly_EA)) {
+  
+  title_nowcast_EA_full    <- "Aggregate EA fit"
+  subtitle_nowcast_EA_full <- "Matrix MF-TPRF aggregate-target specification"
+  
+  plot_nowcast_EA <- ggplot() +
+    annotate(
+      "rect",
+      xmin = covid_start, xmax = covid_end,
+      ymin = -Inf, ymax = Inf,
+      fill = "grey70", alpha = 0.15
+    ) +
+    geom_line(
+      data = df_now_EA_full,
+      aes(x = date, y = y_now_full, color = period),
+      linewidth = 0.9
+    ) +
+    geom_line(
+      data = df_quarterly_EA,
+      aes(x = date, y = y_true, color = "Quarterly EA GDP"),
+      linewidth = 1.0
+    ) +
+    scale_color_manual(
+      values = c(
+        "in-sample"        = "#1F77B4",
+        "real-time"        = "#2ECC71",
+        "Quarterly EA GDP" = "#D62728"
+      ),
+      name = ""
+    ) +
+    scale_x_yearly(df_now_EA_full$date) +
+    labs(
+      title = title_nowcast_EA_full,
+      subtitle = subtitle_nowcast_EA_full,
+      x = "Date",
+      y = "EA GDP growth"
+    ) +
+    theme_paper_plot(base_size = 13)
+  
+  print(plot_nowcast_EA)
+  
+  file_graph_now_EA <- file.path(
+    path_fig_main,
+    paste0(
+      "plot_fit_EA_aggregate_",
+      model_name,
+      "_Size-", Size,
+      "_sel-", sel,
+      "_Lproxy-", Lproxy,
+      "_Lmidas-", L_midas,
+      "_pAR-", p_ar,
+      "_r1-", r1,
+      "_r2-", r2,
+      ".png"
+    )
+  )
+  
+  save_plot_latex(
+    filename = file_graph_now_EA,
+    plot     = plot_nowcast_EA,
+    width    = 8,
+    height   = 6,
+    dpi      = 180
+  )
+  
+  cat("\nSaved aggregate EA full-sample graph to:\n", file_graph_now_EA, "\n")
+}
+
+# ==============================================================================
 # 13. IN-SAMPLE RMSFE
 # ==============================================================================
 
@@ -901,9 +1127,20 @@ rmsfe_insample <- bind_rows(rmsfe_list) %>%
   arrange(country, period)
 
 latex_tab_insample <- list_to_latex_table(
-  df      = rmsfe_insample,
-  caption = paste0("Matrix MF-TPRF in-sample RMSFE by country and period (", Size, ", sel = ", sel, ")"),
-  label   = paste0("tab:matrix_mf_tprf_insample_", Size, "_", sel)
+  df = rmsfe_insample,
+  caption = paste0(
+    "Matrix MF--TPRF in-sample RMSFE by country and period (",
+    proxy_label,
+    ", ",
+    Size,
+    ", sel = ",
+    sel,
+    ")"
+  ),
+  label = paste0(
+    "tab:matrix_mf_tprf_insample_",
+    run_id
+  )
 )
 
 cat("\n", latex_tab_insample, "\n")
@@ -912,9 +1149,23 @@ dir.create(file_out, recursive = TRUE, showWarnings = FALSE)
 
 latex_selection <- save_selection_wide_to_latex(
   df_selection_wide = df_selection_wide,
-  file    = file.path(file_out, "selection_wide_table.tex"),
-  caption = "Country-specific variable selection",
-  label   = "tab:selection_wide"
+  file = file.path(
+    file_out,
+    paste0("selection_wide_table_", run_id, ".tex")
+  ),
+  caption = paste0(
+    "Country-specific variable selection (",
+    proxy_label,
+    ", ",
+    Size,
+    ", sel = ",
+    sel,
+    ")"
+  ),
+  label = paste0(
+    "tab:selection_wide_",
+    run_id
+  )
 )
 
 cat(latex_selection)
@@ -939,12 +1190,12 @@ file_graph_now <- file.path(
   )
 )
 
-ggsave(
+save_plot_latex(
   filename = file_graph_now,
   plot     = plot_nowcast,
-  width    = 12,
-  height   = 8,
-  dpi      = 300
+  width    = 8,
+  height   = 6,
+  dpi      = 180
 )
 
 cat("\nSaved full-sample graph to:\n", file_graph_now, "\n")
@@ -959,9 +1210,68 @@ df_rt <- res_rt$pseudo_rt_all %>%
   mutate(
     date    = as.Date(date),
     type    = factor(month_in_quarter, levels = c("M1", "M2", "M3")),
-    country = factor(country)
+    country = as.character(country)
   ) %>%
   select(date, country, nowcast, type) %>%
+  arrange(country, date, type)
+
+# ------------------------------------------------------------
+# Add aggregate EA real-time nowcasts, if available
+# ------------------------------------------------------------
+
+df_rt_EA_aggregate <- NULL
+
+if (!is.null(res_rt$pseudo_rt_aggregate)) {
+  
+  df_rt_EA_aggregate <- res_rt$pseudo_rt_aggregate %>%
+    mutate(
+      date    = as.Date(date),
+      type    = factor(month_in_quarter, levels = c("M1", "M2", "M3")),
+      country = "EA"
+    ) %>%
+    select(date, country, nowcast, type) %>%
+    arrange(date, type)
+  
+} else if (!is.null(res_rt$pseudo_rt_raw$aggregate)) {
+  
+  A <- res_rt$pseudo_rt_raw$aggregate
+  
+  df_A_M1 <- data.frame(
+    date = as.Date(names(A$M1)),
+    country = "EA",
+    nowcast = as.numeric(A$M1),
+    type = factor("M1", levels = c("M1", "M2", "M3"))
+  )
+  
+  df_A_M2 <- data.frame(
+    date = as.Date(names(A$M2)),
+    country = "EA",
+    nowcast = as.numeric(A$M2),
+    type = factor("M2", levels = c("M1", "M2", "M3"))
+  )
+  
+  df_A_M3 <- data.frame(
+    date = as.Date(names(A$M3)),
+    country = "EA",
+    nowcast = as.numeric(A$M3),
+    type = factor("M3", levels = c("M1", "M2", "M3"))
+  )
+  
+  df_rt_EA_aggregate <- bind_rows(df_A_M1, df_A_M2, df_A_M3) %>%
+    filter(!is.na(date), is.finite(nowcast)) %>%
+    arrange(date, type)
+}
+
+if (!is.null(df_rt_EA_aggregate) && nrow(df_rt_EA_aggregate) > 0) {
+  
+  # avoid duplicate EA rows if already present in pseudo_rt_all
+  df_rt <- df_rt %>%
+    filter(country != "EA") %>%
+    bind_rows(df_rt_EA_aggregate)
+}
+
+df_rt <- df_rt %>%
+  mutate(country = factor(country)) %>%
   arrange(country, date, type)
 
 countries_rt      <- unique(as.character(df_rt$country))
@@ -1033,6 +1343,85 @@ plot_rt <- ggplot() +
   theme_paper_plot(base_size = 14)
 
 print(plot_rt)
+
+# ==============================================================================
+# 16B. PSEUDO REAL-TIME PLOT: AGGREGATE EA
+# ==============================================================================
+
+if ("EA" %in% as.character(df_rt$country)) {
+  
+  df_rt_EA <- df_rt %>%
+    filter(country == "EA")
+  
+  df_yq_EA <- df_yq %>%
+    filter(country == "EA")
+  
+  title_rt_EA    <- "Rolling real-time nowcasts: aggregate EA"
+  subtitle_rt_EA <- "Matrix MF-TPRF aggregate-target specification"
+  
+  plot_rt_EA <- ggplot() +
+    annotate(
+      "rect",
+      xmin = params_rt$covid_start, xmax = params_rt$covid_end,
+      ymin = -Inf, ymax = Inf,
+      fill = "grey80", alpha = 0.20
+    ) +
+    geom_line(
+      data = df_yq_EA,
+      aes(x = date, y = GDP, color = "True EA GDP"),
+      linewidth = 1.0
+    ) +
+    geom_line(
+      data = df_rt_EA,
+      aes(x = date, y = nowcast, color = type),
+      linewidth = 0.8
+    ) +
+    geom_point(
+      data = df_rt_EA,
+      aes(x = date, y = nowcast, color = type),
+      size = 1.6
+    ) +
+    scale_color_manual(
+      values = c(
+        "True EA GDP" = "#D62728",
+        "M1"          = "#1F77B4",
+        "M2"          = "#2ECC71",
+        "M3"          = "#F1C40F"
+      ),
+      name = "Series"
+    ) +
+    scale_x_yearly(df_rt_EA$date) +
+    labs(
+      title = title_rt_EA,
+      subtitle = subtitle_rt_EA,
+      x = "Date",
+      y = "EA GDP growth"
+    ) +
+    theme_paper_plot(base_size = 14)
+  
+  print(plot_rt_EA)
+  
+  file_graph_rt_EA <- file.path(
+    path_fig_rt_bycc,
+    paste0(
+      "plot_rt_EA_aggregate_",
+      model_name,
+      "_Size-", Size,
+      "_sel-", sel,
+      ".png"
+    )
+  )
+  
+  save_plot_latex(
+    filename = file_graph_rt_EA,
+    plot     = plot_rt_EA,
+    width    = 7,
+    height   = 4,
+    dpi      = 180
+  )
+  
+  cat("\nSaved aggregate EA real-time graph to:\n", file_graph_rt_EA, "\n")
+}
 
 # ==============================================================================
 # 17. SPLIT REAL-TIME PLOTS
@@ -1161,8 +1550,21 @@ file_graph_rt_other <- file.path(
   )
 )
 
-ggsave(file_graph_rt_big4,  plot_rt_big4,  width = 12, height = 8, dpi = 300)
-ggsave(file_graph_rt_other, plot_rt_other, width = 12, height = 8, dpi = 300)
+save_plot_latex(
+  filename = file_graph_rt_big4,
+  plot     = plot_rt_big4,
+  width    = 8,
+  height   = 6,
+  dpi      = 180
+)
+
+save_plot_latex(
+  filename = file_graph_rt_other,
+  plot     = plot_rt_other,
+  width    = 8,
+  height   = 6,
+  dpi      = 180
+)
 
 # ==============================================================================
 # 18. COUNTRY-BY-COUNTRY REAL-TIME PLOTS
@@ -1227,7 +1629,7 @@ for (cc in countries_eval_rt) {
     subtitle = subtitle_rt_cc
   )
   
-  ggsave(
+  save_plot_latex(
     filename = file.path(
       path_fig_rt_bycc,
       paste0(
@@ -1239,10 +1641,10 @@ for (cc in countries_eval_rt) {
         ".png"
       )
     ),
-    plot = p_cc,
-    width = 9,
-    height = 5,
-    dpi = 300
+    plot   = p_cc,
+    width  = 7,
+    height = 4,
+    dpi    = 180
   )
 }
 
@@ -1332,13 +1734,14 @@ file_graph_rt_post8 <- file.path(
   )
 )
 
-ggsave(
+save_plot_latex(
   filename = file_graph_rt_post8,
   plot     = plot_rt_post8,
   width    = 12,
   height   = 8,
   dpi      = 300
 )
+
 
 cat("\nSaved post-COVID 8-country rolling graph to:\n", file_graph_rt_post8, "\n")
 
@@ -1396,12 +1799,54 @@ rmsfe_rt_wide <- rmsfe_rt %>%
   arrange(country, period)
 
 latex_tab_rt <- list_to_latex_table(
-  df      = rmsfe_rt_wide,
-  caption = paste0("Matrix MF-TPRF rolling RMSFE by country and period (", Size, ", sel = ", sel, ")"),
-  label   = paste0("tab:matrix_mf_tprf_rt_", Size, "_", sel)
+  df = rmsfe_rt_wide,
+  caption = paste0(
+    "Matrix MF--TPRF rolling RMSFE by country and period (",
+    proxy_label,
+    ", ",
+    Size,
+    ", sel = ",
+    sel,
+    ")"
+  ),
+  label = paste0(
+    "tab:matrix_mf_tprf_rt_",
+    run_id
+  )
 )
 
 cat("\n", latex_tab_rt, "\n")
+
+# ==============================================================================
+# 20B. ROLLING RMSFE: AGGREGATE EA
+# ==============================================================================
+
+if ("EA" %in% as.character(df_rt$country)) {
+  
+  rmsfe_rt_EA <- rmsfe_rt_wide %>%
+    filter(country == "EA")
+  
+  print(rmsfe_rt_EA)
+  
+  latex_tab_rt_EA <- list_to_latex_table(
+    df = rmsfe_rt_EA,
+    caption = paste0(
+      "Matrix MF--TPRF aggregate EA rolling RMSFE (",
+      proxy_label,
+      ", ",
+      Size,
+      ", sel = ",
+      sel,
+      ")"
+    ),
+    label = paste0(
+      "tab:matrix_mf_tprf_EA_aggregate_rt_",
+      run_id
+    )
+  )
+  
+  cat("\n", latex_tab_rt_EA, "\n")
+}
 
 # ==============================================================================
 # 21. SAVE ROLLING GRAPH
@@ -1428,12 +1873,12 @@ file_graph_rt_full <- file.path(
   )
 )
 
-ggsave(
+save_plot_latex(
   filename = file_graph_rt_full,
   plot     = plot_rt,
-  width    = 12,
-  height   = 8,
-  dpi      = 300
+  width    = 8,
+  height   = 6,
+  dpi      = 180
 )
 
 cat("\nSaved rolling graph to:\n", file_graph_rt_full, "\n")
@@ -1528,7 +1973,12 @@ summary_tensor_out <- list(
   stage    = "cross_country",
   Size     = Size,
   sel      = sel,
-  params   = params_rt,
+  
+  proxy_mode  = proxy_mode,
+  proxy_label = proxy_label,
+  run_id      = run_id,
+  
+  params = params_rt,
   
   hyper = hyper_summary,
   graph_titles = graph_titles,
@@ -1631,7 +2081,7 @@ file_summary_matrix <- build_result_filename(
   covid_q          = as.integer(isTRUE(params_rt$covid_mask_q)),
   ext              = "rds",
   timestamp        = FALSE,
-  include_details  = TRUE
+  include_details  = FALSE
 )
 
 if (file.exists(file_summary_matrix)) file.remove(file_summary_matrix)

@@ -174,8 +174,21 @@ prepare_country_inputs_from_tensor_vectorized <- function(tensor, data, country,
   predictor_names <- predictor_names[keep_nonempty]
   predictor_var   <- predictor_var[keep_nonempty]
   
-  vars_m <- tensor$vars[1:tensor$n_M]
-  vars_q <- tensor$vars[(tensor$n_M + 1):(tensor$n_M + tensor$n_Q)]
+  vars_m <- if (tensor$n_M > 0) {
+    tensor$vars[seq_len(tensor$n_M)]
+  } else {
+    character(0)
+  }
+  
+  vars_q <- if (tensor$n_Q > 0) {
+    tensor$vars[tensor$n_M + seq_len(tensor$n_Q)]
+  } else {
+    character(0)
+  }
+  
+  if (ncol(X_vec) == 0L) {
+    stop("No non-empty predictors available after tensor vectorization for country: ", country)
+  }
   
   get_base_meta <- function(x) {
     if (is.null(dim(x))) return(as.vector(x))
@@ -346,18 +359,12 @@ estimate_country_mf_tprf <- function(country_inputs, params) {
 # 3. PSEUDO REAL-TIME NOWCASTING
 # ==============================================================================
 
-run_country_mf_tprf_rt <- function(country_inputs, params) {
+run_country_mf_tprf_rt <- function(regime_data_pre, regime_data_post, params) {
   
   rt_raw <- pseudo_realtime_MF_TPRF_XP(
-    X_full  = country_inputs$X,
-    y_q     = country_inputs$y_q,
-    params  = params,
-    dates   = country_inputs$dates_m,
-    dates_q = country_inputs$dates_q,
-    Freq    = country_inputs$freq,
-    Unb     = country_inputs$unb,
-    agg_m   = country_inputs$agg_m,
-    agg_q   = country_inputs$agg_q
+    params           = params,
+    regime_data_pre  = regime_data_pre,
+    regime_data_post = regime_data_post
   )
   
   df_M1 <- list_to_df_nowcast(rt_raw$M1, "M1")
@@ -369,20 +376,18 @@ run_country_mf_tprf_rt <- function(country_inputs, params) {
     df_rt <- dplyr::arrange(df_rt, date, month_in_quarter)
   }
   
-  list(
-    raw = rt_raw,
-    M1  = df_M1,
-    M2  = df_M2,
-    M3  = df_M3,
-    all = df_rt
-  )
+  list(raw = rt_raw, M1 = df_M1, M2 = df_M2, M3 = df_M3, all = df_rt)
 }
 
 # ==============================================================================
 # 4. COUNTRY WRAPPER
 # ==============================================================================
 
-run_country_mf_tprf <- function(country_inputs, params, path_results = NULL) {
+run_country_mf_tprf <- function(country_inputs,
+                                regime_data_pre,
+                                regime_data_post,
+                                params,
+                                path_results = NULL) {
   
   win <- get_country_eval_windows(country_inputs, params)
   
@@ -396,13 +401,20 @@ run_country_mf_tprf <- function(country_inputs, params, path_results = NULL) {
   params_rt$end_eval <- params_cc$end_eval_rt
   
   est <- estimate_country_mf_tprf(country_inputs, params_cc)
-  rt  <- run_country_mf_tprf_rt(country_inputs, params_rt)
+  
+  rt <- run_country_mf_tprf_rt(
+    regime_data_pre  = regime_data_pre,
+    regime_data_post = regime_data_post,
+    params           = params_rt
+  )
   
   out <- list(
     model_id        = "MF_TPRF",
     country         = country_inputs$country,
     params          = params_cc,
     inputs          = country_inputs,
+    regime_data_pre = regime_data_pre,
+    regime_data_post = regime_data_post,
     full_sample     = est,
     pseudo_realtime = rt
   )
@@ -423,7 +435,14 @@ run_country_mf_tprf <- function(country_inputs, params, path_results = NULL) {
 # 5. CROSS-COUNTRY WRAPPERS
 # ==============================================================================
 
-run_all_countries_mf_tprf <- function(countries, all_countries, params, path_results = NULL) {
+run_all_countries_mf_tprf <- function(countries,
+                                      all_countries,
+                                      all_countries_rt_pre,
+                                      all_countries_rt_post,
+                                      selection_end_pre,
+                                      selection_end_post,
+                                      params,
+                                      path_results = NULL) {
   
   results <- vector("list", length(countries))
   names(results) <- countries
@@ -439,24 +458,54 @@ run_all_countries_mf_tprf <- function(countries, all_countries, params, path_res
       params        = params
     )
     
+    regime_data_pre <- make_vector_regime_data(
+      all_countries = all_countries_rt_pre,
+      country       = cc,
+      params        = params,
+      label         = "pre_evaluation_selection",
+      selection_end = selection_end_pre
+    )
+    
+    regime_data_post <- make_vector_regime_data(
+      all_countries = all_countries_rt_post,
+      country       = cc,
+      params        = params,
+      label         = "post_covid_selection",
+      selection_end = selection_end_post
+    )
+    
     results[[cc]] <- run_country_mf_tprf(
-      country_inputs = country_inputs,
-      params         = params,
-      path_results   = path_results
+      country_inputs   = country_inputs,
+      regime_data_pre  = regime_data_pre,
+      regime_data_post = regime_data_post,
+      params           = params,
+      path_results     = path_results
     )
   }
   
   results
 }
 
-run_all_countries_mf_tprf_from_tensor <- function(countries, tensor, data, params, path_results = NULL) {
+run_all_countries_mf_tprf_from_tensor <- function(countries,
+                                                  tensor,
+                                                  data,
+                                                  tensor_pre,
+                                                  data_pre,
+                                                  tensor_post,
+                                                  data_post,
+                                                  selection_end_pre,
+                                                  selection_end_post,
+                                                  params,
+                                                  path_results = NULL,
+                                                  parallel = TRUE) {
   
-  countries_run <- if (!is.null(params$target_cc)) setdiff(countries, params$target_cc) else countries
+  countries_run <- if (!is.null(params$target_cc)) {
+    setdiff(countries, params$target_cc)
+  } else {
+    countries
+  }
   
-  results <- vector("list", length(countries_run))
-  names(results) <- countries_run
-  
-  for (cc in countries_run) {
+  run_one_country <- function(cc) {
     cat("\n==============================\n")
     cat("Running vectorized-tensor country:", cc, "\n")
     cat("==============================\n")
@@ -468,16 +517,58 @@ run_all_countries_mf_tprf_from_tensor <- function(countries, tensor, data, param
       params  = params
     )
     
-    results[[cc]] <- run_country_mf_tprf(
-      country_inputs = country_inputs,
-      params         = params,
-      path_results   = path_results
+    regime_data_pre <- make_vector_regime_data_from_tensor(
+      tensor        = tensor_pre,
+      data          = data_pre,
+      country       = cc,
+      params        = params,
+      label         = "pre_evaluation_selection",
+      selection_end = selection_end_pre
     )
+    
+    regime_data_post <- make_vector_regime_data_from_tensor(
+      tensor        = tensor_post,
+      data          = data_post,
+      country       = cc,
+      params        = params,
+      label         = "post_covid_selection",
+      selection_end = selection_end_post
+    )
+    
+    out <- run_country_mf_tprf(
+      country_inputs   = country_inputs,
+      regime_data_pre  = regime_data_pre,
+      regime_data_post = regime_data_post,
+      params           = params,
+      path_results     = path_results
+    )
+    
+    cat("\nCompleted vectorized-tensor country:", cc, "\n")
+    
+    out
   }
   
+  if (isTRUE(parallel)) {
+    progressr::with_progress({
+      p <- progressr::progressor(along = countries_run)
+      
+      results <- future.apply::future_lapply(countries_run, function(cc) {
+        out <- run_one_country(cc)
+        p(sprintf("completed %s", cc))
+        out
+      })
+    })
+  } else {
+    results <- lapply(countries_run, function(cc) {
+      out <- run_one_country(cc)
+      cat("\nProgress:", which(countries_run == cc), "/", length(countries_run), "\n")
+      out
+    })
+  }
+  
+  names(results) <- countries_run
   results
 }
-
 # ==============================================================================
 # 6. COUNTRY SUMMARY OBJECTS
 # ==============================================================================

@@ -158,7 +158,7 @@ select_L_autoproxy_3prf <- function(
 
 choose_UMIDAS_grid_tensor_MF <- function(
     X_lf, X_hf, y_q,
-    rmax = c(2,8),
+    rmax = c(2, 8),
     Lproxy = 1,
     Lmax = 5,
     p_AR_max = 4,
@@ -168,6 +168,8 @@ choose_UMIDAS_grid_tensor_MF <- function(
     standardize_proxy = TRUE,
     orthonormalize_each_iter = TRUE,
     orthonormalize_final_Z = TRUE,
+    pass1_orthonormalize_Z = TRUE,
+    pass1_center_Z = TRUE,
     ils_maxit = 100,
     ils_tol = 1e-8
 ) {
@@ -237,8 +239,8 @@ choose_UMIDAS_grid_tensor_MF <- function(
     X_lf = X_lf,
     Z_q  = Z_q_use,
     rmax = c(rmax1, rmax2),
-    orthonormalize_Z = TRUE,
-    center_Z = TRUE,
+    orthonormalize_Z = pass1_orthonormalize_Z,
+    center_Z = pass1_center_Z,
     maxit = ils_maxit,
     tol = ils_tol
   )
@@ -949,8 +951,124 @@ mf_tprf_nowcast_monthly <- function(
   y_nowcast
 }
 
+prepare_multivariate_proxy_window <- function(
+    X_lf,
+    X_hf,
+    Y_q_all,
+    country_cols,
+    months_per_quarter = 3L
+) {
+  
+  stopifnot(
+    length(dim(X_lf)) == 3L,
+    length(dim(X_hf)) == 3L
+  )
+  
+  T_q <- dim(X_lf)[1L]
+  T_m <- dim(X_hf)[1L]
+  
+  months_per_quarter <- as.integer(months_per_quarter)
+  
+  if (months_per_quarter < 1L) {
+    stop("months_per_quarter must be at least one.")
+  }
+  
+  if (nrow(Y_q_all) < T_q) {
+    stop("Y_q_all has fewer rows than X_lf.")
+  }
+  
+  if (!all(country_cols %in% colnames(Y_q_all))) {
+    stop("Some target-proxy countries are missing from Y_q_all.")
+  }
+  
+  Z_raw <- as.matrix(
+    Y_q_all[
+      seq_len(T_q),
+      country_cols,
+      drop = FALSE
+    ]
+  )
+  
+  complete_rows <- apply(is.finite(Z_raw), 1L, all)
+  complete_idx  <- which(complete_rows)
+  
+  if (length(complete_idx) < 2L) {
+    stop("Fewer than two complete multivariate target-proxy observations.")
+  }
+  
+  q_first <- min(complete_idx)
+  q_last  <- max(complete_idx)
+  q_idx   <- seq.int(q_first, q_last)
+  
+  if (length(complete_idx) != length(q_idx) ||
+      any(complete_idx != q_idx)) {
+    
+    bad_idx <- setdiff(q_idx, complete_idx)
+    q_labels <- dimnames(X_lf)[[1]]
+    
+    bad_rows <- if (is.null(q_labels)) {
+      paste(bad_idx, collapse = ", ")
+    } else {
+      paste(q_labels[bad_idx], collapse = ", ")
+    }
+    
+    stop(
+      "Multivariate target proxies have internal missing rows: ",
+      bad_rows
+    )
+  }
+  
+  month_idx <- seq.int(
+    (q_first - 1L) * months_per_quarter + 1L,
+    q_last * months_per_quarter
+  )
+  
+  if (max(month_idx) > T_m) {
+    stop("X_hf does not contain all months required by the target-proxy window.")
+  }
+  
+  Z_complete <- Z_raw[q_idx, , drop = FALSE]
+  
+  proxy_sd <- apply(Z_complete, 2L, sd)
+  
+  bad_cols <- names(proxy_sd)[
+    !is.finite(proxy_sd) |
+      proxy_sd <= sqrt(.Machine$double.eps)
+  ]
+  
+  if (length(bad_cols) > 0L) {
+    stop(
+      "Zero-variance or invalid multivariate target proxies: ",
+      paste(bad_cols, collapse = ", ")
+    )
+  }
+  
+  Z_q <- as.matrix(
+    scale(
+      Z_complete,
+      center = TRUE,
+      scale = TRUE
+    )
+  )
+  
+  if (any(!is.finite(Z_q))) {
+    stop("Standardized multivariate target proxies contain NA or Inf.")
+  }
+  
+  list(
+    q_idx = q_idx,
+    q_first = q_first,
+    q_last = q_last,
+    X_lf = X_lf[q_idx, , , drop = FALSE],
+    X_hf = X_hf[month_idx, , , drop = FALSE],
+    Z_q = Z_q,
+    T_q_targeting = length(q_idx),
+    dropped_rows = which(!complete_rows)
+  )
+}
+
 # ==============================================================================
-# AUTO-PROXIES for Matrix MF-TPRF (NO nested functions)
+# AUTO-PROXIES for Matrix MF-TPRF 
 # ==============================================================================
 matrix_mf_tprf_autoproxy <- function(
     X_lf, X_hf, y_q,
@@ -1097,9 +1215,11 @@ matrix_mf_tprf_autoproxy <- function(
 Tensor_MF_TPRF <- function(
     X_lf, X_hf, Y_q_all,
     proxy_name = "EA",
+    proxy_mode = c("scalar", "multivariate"),
+    forecast_mode = c("countries", "aggregate", "both"),
     Lproxy = 1,
     L_midas = 1,
-    p_AR = 1,            # allow 0
+    p_AR = 1,
     rmax = c(2, 8),
     standardize_proxy = TRUE,
     orthonormalize_each_iter = TRUE,
@@ -1107,6 +1227,9 @@ Tensor_MF_TPRF <- function(
     ils_maxit = 100,
     ils_tol = 1e-8
 ) {
+  
+  forecast_mode <- match.arg(forecast_mode)
+  proxy_mode <- match.arg(proxy_mode)
   
   # ---- checks
   stopifnot(length(dim(X_lf)) == 3, length(dim(X_hf)) == 3)
@@ -1141,29 +1264,75 @@ Tensor_MF_TPRF <- function(
   dates_q <- if (!is.null(dnq[[1]])) dnq[[1]] else as.character(seq_len(T_q))
   dates_m <- if (!is.null(dnm[[1]])) dnm[[1]] else as.character(seq_len(T_m))
   
-  # --------------------------------------------------
-  # STEP 1: autoproxy Z_q (EA)
-  # --------------------------------------------------
-  auto <- matrix_mf_tprf_autoproxy(
-    X_lf = X_lf, X_hf = X_hf, y_q = y_proxy,
-    Lproxy = Lproxy, L_midas = L_midas, p_AR = p_AR,
-    rmax = c(rmax1, rmax2),
-    standardize_y = standardize_proxy,
-    orthonormalize_each_iter = orthonormalize_each_iter,
-    orthonormalize_final = orthonormalize_final_Z,
-    ils_maxit = ils_maxit, ils_tol = ils_tol
-  )
-  Z_q <- auto$Z
   
+  X_lf_pass1 <- X_lf
+  target_proxy_rows <- seq_len(T_q)
+  target_proxy_window <- NULL
+  
+  # --------------------------------------------------
+  # STEP 1: construct proxy matrix Z_q
+  # --------------------------------------------------
+  
+  if (proxy_mode == "scalar") {
+    
+    auto <- matrix_mf_tprf_autoproxy(
+      X_lf = X_lf,
+      X_hf = X_hf,
+      y_q  = y_proxy,
+      Lproxy = Lproxy,
+      L_midas = L_midas,
+      p_AR = p_AR,
+      rmax = c(rmax1, rmax2),
+      standardize_y = standardize_proxy,
+      orthonormalize_each_iter = orthonormalize_each_iter,
+      orthonormalize_final = orthonormalize_final_Z,
+      ils_maxit = ils_maxit,
+      ils_tol = ils_tol
+    )
+    
+    Z_q <- auto$Z
+    
+    Lproxy_used <- ncol(Z_q)
+    
+    pass1_orthonormalize_Z <- TRUE
+    pass1_center_Z <- TRUE
+    
+  } else {
+    
+    if (!isTRUE(standardize_proxy)) {
+      stop(
+        "The multivariate proxy design requires country-specific standardization."
+      )
+    }
+    
+    target_proxy_window <- prepare_multivariate_proxy_window(
+      X_lf = X_lf,
+      X_hf = X_hf,
+      Y_q_all = Y_q_all,
+      country_cols = countries
+    )
+    
+    Z_q <- target_proxy_window$Z_q
+    
+    X_lf_pass1 <- target_proxy_window$X_lf
+    target_proxy_rows <- target_proxy_window$q_idx
+    
+    auto <- NULL
+    
+    Lproxy_used <- ncol(Z_q)
+    
+    pass1_orthonormalize_Z <- FALSE
+    pass1_center_Z <- FALSE
+  }
   # --------------------------------------------------
   # STEP 2: final Pass 1 (targeting) using ALL proxies
   # --------------------------------------------------
   pass1 <- mf_tprf_pass1_ils(
-    X_lf = X_lf,
+    X_lf = X_lf_pass1,
     Z_q  = Z_q,
     rmax = c(rmax1, rmax2),
-    orthonormalize_Z = TRUE,
-    center_Z = TRUE,
+    orthonormalize_Z = pass1_orthonormalize_Z,
+    center_Z = pass1_center_Z,
     maxit = ils_maxit,
     tol = ils_tol
   )
@@ -1181,45 +1350,104 @@ Tensor_MF_TPRF <- function(
   )
   
   # --------------------------------------------------
-  # STEP 4: per-country quarterly fit + monthly nowcast
+  # STEP 4A: aggregate quarterly fit + monthly nowcast
   # --------------------------------------------------
-  results_country <- vector("list", length(countries))
-  names(results_country) <- countries
+  result_aggregate <- NULL
   
-  for (cc in countries) {
+  if (forecast_mode %in% c("aggregate", "both")) {
     
-    y_cc <- as.numeric(Y_q_all[, cc])
-    if (length(y_cc) != T_q) stop(paste0("Country ", cc, ": y length mismatch."))
+    y_A <- as.numeric(Y_q_all[, proxy_name])
+    if (length(y_A) != T_q) stop("Aggregate target length mismatch.")
     
-    fit3 <- mf_tprf_pass3_fit_quarterly(
-      y_q = y_cc,
-      F1 = pass2$F1, F2 = pass2$F2, F3 = pass2$F3,
+    fit3_A <- mf_tprf_pass3_fit_quarterly(
+      y_q = y_A,
+      F1 = pass2$F1,
+      F2 = pass2$F2,
+      F3 = pass2$F3,
       p_AR = p_AR,
       L_midas = L_midas
     )
     
-    y_now <- mf_tprf_nowcast_monthly(
-      beta0 = fit3$beta0,
-      rho_hat = fit3$rho_hat,
-      beta_mat = fit3$beta_mat,
-      y_q = y_cc,
-      F1 = pass2$F1, F2 = pass2$F2, F3 = pass2$F3,
-      F_next1 = pass2$F_next1, F_next2 = pass2$F_next2, F_next3 = pass2$F_next3,
+    y_now_A <- mf_tprf_nowcast_monthly(
+      beta0 = fit3_A$beta0,
+      rho_hat = fit3_A$rho_hat,
+      beta_mat = fit3_A$beta_mat,
+      y_q = y_A,
+      F1 = pass2$F1,
+      F2 = pass2$F2,
+      F3 = pass2$F3,
+      F_next1 = pass2$F_next1,
+      F_next2 = pass2$F_next2,
+      F_next3 = pass2$F_next3,
       p_AR = p_AR,
       L_midas = L_midas,
       T_q = T_q,
       T_m = T_m
     )
     
-    results_country[[cc]] <- list(
-      fit3 = fit3$fit,
-      beta0 = fit3$beta0,
-      rho_hat = fit3$rho_hat,
-      beta_mat = fit3$beta_mat,
-      start_tau = fit3$start_tau,
-      yhat_q = fit3$yhat_q,
-      y_nowcast = y_now
+    result_aggregate <- list(
+      target_name = proxy_name,
+      fit3 = fit3_A$fit,
+      beta0 = fit3_A$beta0,
+      rho_hat = fit3_A$rho_hat,
+      beta_mat = fit3_A$beta_mat,
+      start_tau = fit3_A$start_tau,
+      yhat_q = fit3_A$yhat_q,
+      y_nowcast = y_now_A
     )
+  }
+  
+  # --------------------------------------------------
+  # STEP 4B: per-country quarterly fit + monthly nowcast
+  # --------------------------------------------------
+  results_country <- NULL
+  
+  if (forecast_mode %in% c("countries", "both")) {
+    
+    results_country <- vector("list", length(countries))
+    names(results_country) <- countries
+    
+    for (cc in countries) {
+      
+      y_cc <- as.numeric(Y_q_all[, cc])
+      if (length(y_cc) != T_q) stop(paste0("Country ", cc, ": y length mismatch."))
+      
+      fit3 <- mf_tprf_pass3_fit_quarterly(
+        y_q = y_cc,
+        F1 = pass2$F1,
+        F2 = pass2$F2,
+        F3 = pass2$F3,
+        p_AR = p_AR,
+        L_midas = L_midas
+      )
+      
+      y_now <- mf_tprf_nowcast_monthly(
+        beta0 = fit3$beta0,
+        rho_hat = fit3$rho_hat,
+        beta_mat = fit3$beta_mat,
+        y_q = y_cc,
+        F1 = pass2$F1,
+        F2 = pass2$F2,
+        F3 = pass2$F3,
+        F_next1 = pass2$F_next1,
+        F_next2 = pass2$F_next2,
+        F_next3 = pass2$F_next3,
+        p_AR = p_AR,
+        L_midas = L_midas,
+        T_q = T_q,
+        T_m = T_m
+      )
+      
+      results_country[[cc]] <- list(
+        fit3 = fit3$fit,
+        beta0 = fit3$beta0,
+        rho_hat = fit3$rho_hat,
+        beta_mat = fit3$beta_mat,
+        start_tau = fit3$start_tau,
+        yhat_q = fit3$yhat_q,
+        y_nowcast = y_now
+      )
+    }
   }
   
   # --------------------------------------------------
@@ -1227,7 +1455,12 @@ Tensor_MF_TPRF <- function(
   # --------------------------------------------------
   list(
     proxy_name = proxy_name,
+    proxy_mode = proxy_mode,
+    proxy_columns = colnames(Z_q),
+    forecast_mode = forecast_mode,
     Z_q = Z_q,
+    target_proxy_rows = target_proxy_rows,
+    target_proxy_dates = dates_q[target_proxy_rows],
     autoproxy = auto,
     R = Rhat,
     C = Chat,
@@ -1235,15 +1468,26 @@ Tensor_MF_TPRF <- function(
     pass1_obj_path = pass1$obj_path,
     factors = list(
       F_hf = pass2$F_hf,
-      F1 = pass2$F1, F2 = pass2$F2, F3 = pass2$F3,
+      F1 = pass2$F1,
+      F2 = pass2$F2,
+      F3 = pass2$F3,
       rem = pass2$rem,
-      F_next1 = pass2$F_next1, F_next2 = pass2$F_next2, F_next3 = pass2$F_next3,
-      dates_m = dates_m, dates_q = dates_q
+      F_next1 = pass2$F_next1,
+      F_next2 = pass2$F_next2,
+      F_next3 = pass2$F_next3,
+      dates_m = dates_m,
+      dates_q = dates_q
     ),
+    aggregate = result_aggregate,
     by_country = results_country,
     meta = list(
-      Lproxy = Lproxy, L_midas = L_midas, p_AR = p_AR, rmax = c(rmax1, rmax2),
-      standardize_proxy = standardize_proxy
+      Lproxy = Lproxy_used,
+      L_midas = L_midas,
+      p_AR = p_AR,
+      rmax = c(rmax1, rmax2),
+      standardize_proxy = standardize_proxy,
+      T_q_full = T_q,
+      T_q_targeting = length(target_proxy_rows)
     )
   )
 }

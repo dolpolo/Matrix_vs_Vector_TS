@@ -48,11 +48,25 @@ params <- list(
 )
 
 Size <- "small"   # "small" | "medium" | "large"
-sel  <- "LASSO"   # "corr"  | "LASSO"
+sel  <- "corr"   # "corr" | "LASSO"
 
-model_matrix    <- "matrix"
+proxy_mode <- "scalar"   # "scalar" | "multivariate"
+
+model_matrix    <- paste0("matrix_", proxy_mode)
 model_vector    <- "vector"
 model_vectensor <- "vectensor"
+
+matrix_proxy_label <- switch(
+  proxy_mode,
+  scalar = "Scalar EA-residual proxy",
+  multivariate = "Multivariate national-GDP proxy"
+)
+
+matrix_display_label <- switch(
+  proxy_mode,
+  scalar = "Matrix MF-TPRF (Scalar)",
+  multivariate = "Matrix MF-TPRF (Multivariate)"
+)
 
 country_order <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
 period_order  <- c("Pre-COVID", "COVID period", "Post-COVID")
@@ -64,7 +78,11 @@ period_date_map <- c(
   "Post-COVID"   = "Aug 2021 -- Feb 2026"
 )
 
-suffix_out <- paste0("Size-", Size, "_sel-", sel)
+suffix_out <- paste0(
+  "proxy-", proxy_mode,
+  "_Size-", Size,
+  "_sel-", sel
+)
 
 run_factor_analysis <- is_factor_case(Size, sel)
 
@@ -129,29 +147,69 @@ file_dfm_summary <- find_dfm_summary_file(
   sel  = sel
 )
 
-file_dfm_summary_auto <- find_dfm_summary_file(
-  path = path_dfm_results_auto,
-  Size = Size,
-  sel  = sel
-)
+# file_dfm_summary_auto <- find_dfm_summary_file(
+#   path = path_dfm_results_auto,
+#   Size = Size,
+#   sel  = sel
+# )
 
 summary_matrix    <- readRDS(file_matrix_summary)
 summary_vector    <- readRDS(file_vector_summary)
 summary_vectensor <- readRDS(file_vectensor_summary)
 summary_dfm      <- readRDS(file_dfm_summary)
-summary_dfm_auto <- readRDS(file_dfm_summary_auto)
+# summary_dfm_auto <- readRDS(file_dfm_summary_auto)
+
+if (is.null(summary_matrix$proxy_mode)) {
+  stop("The loaded Matrix summary does not contain proxy_mode.")
+}
+
+if (!identical(as.character(summary_matrix$proxy_mode), proxy_mode)) {
+  stop(
+    "Loaded Matrix summary does not match the selected proxy mode. ",
+    "Requested: ", proxy_mode,
+    " | Loaded: ", summary_matrix$proxy_mode
+  )
+}
 
 cat("\nLoaded matrix summary from:\n", file_matrix_summary, "\n")
 cat("\nLoaded vector summary from:\n", file_vector_summary, "\n")
 cat("\nLoaded vectensor summary from:\n", file_vectensor_summary, "\n")
 cat("\nLoaded DFM summary from:\n", file_dfm_summary, "\n")
-cat("\nLoaded DFM summary for q auto from:\n", file_dfm_summary_auto, "\n")
+# cat("\nLoaded DFM summary for q auto from:\n", file_dfm_summary_auto, "\n")
 
 
-Size <- if (!is.null(summary_matrix$Size)) summary_matrix$Size else Size
-sel  <- if (!is.null(summary_matrix$sel))  summary_matrix$sel  else sel
+Size <- if (!is.null(summary_matrix$Size)) {
+  summary_matrix$Size
+} else {
+  Size
+}
 
-suffix_out <- paste0("Size-", Size, "_sel-", sel)
+sel <- if (!is.null(summary_matrix$sel)) {
+  summary_matrix$sel
+} else {
+  sel
+}
+
+proxy_mode <- as.character(summary_matrix$proxy_mode)
+
+matrix_proxy_label <- switch(
+  proxy_mode,
+  scalar = "Scalar EA-residual proxy",
+  multivariate = "Multivariate national-GDP proxy"
+)
+
+matrix_display_label <- switch(
+  proxy_mode,
+  scalar = "Matrix MF-TPRF (Scalar)",
+  multivariate = "Matrix MF-TPRF (Multivariate)"
+)
+
+suffix_out <- paste0(
+  "proxy-", proxy_mode,
+  "_Size-", Size,
+  "_sel-", sel
+)
+
 run_factor_analysis <- is_factor_case(Size, sel)
 
 file_vector_summary_ea <- NULL
@@ -883,187 +941,259 @@ country_labels <- c(
 )
 
 # ------------------------------------------------------------------------------
-# 8.1 Single-country plot
+# 8.1 Single-country plots: automatically for all countries
 # ------------------------------------------------------------------------------
 
-country_focus <- "PT"
-country_focus_label <- unname(country_labels[country_focus])
+path_single_country_plots <- file.path(path_final_results, "country_model_plots")
+dir.create(path_single_country_plots, recursive = TRUE, showWarnings = FALSE)
 
-df_single_all <- dplyr::bind_rows(
-  extract_country_rt(summary_matrix$df_rt_all,    country_focus, label_matrix),
-  extract_country_rt(summary_vectensor$df_rt_all, country_focus, label_vecp),
-  extract_country_rt(summary_vector$df_rt_all,    country_focus, label_vecc),
-  extract_country_rt(summary_dfm$df_rt_all,       country_focus, label_dfm)
-) %>%
-  dplyr::mutate(
-    model = factor(model, levels = model_levels),
-    type  = factor(type, levels = month_order)
+plot_single_models_by_country <- list()
+file_single_png_by_country <- list()
+
+
+for (country_focus in country_order) {
+  
+  country_focus_label <- unname(country_labels[country_focus])
+  if (is.na(country_focus_label)) country_focus_label <- country_focus
+  
+  df_single_all <- dplyr::bind_rows(
+    extract_country_rt(summary_matrix$df_rt_all,    country_focus, label_matrix),
+    extract_country_rt(summary_vectensor$df_rt_all, country_focus, label_vecp),
+    extract_country_rt(summary_vector$df_rt_all,    country_focus, label_vecc),
+    extract_country_rt(summary_dfm$df_rt_all,       country_focus, label_dfm)
+  ) %>%
+    dplyr::mutate(
+      model = factor(model, levels = model_levels),
+      type  = factor(type, levels = month_order)
+    )
+  
+  if (nrow(df_single_all) == 0L) {
+    cat("\nSkipping country plot:", country_focus, "- no RT data.\n")
+    next
+  }
+  
+  df_single_gdp <- extract_country_gdp(
+    summary_matrix$df_yq_eval_all,
+    country_focus
   )
-
-df_single_gdp <- extract_country_gdp(
-  summary_matrix$df_yq_eval_all,
-  country_focus
-)
-
-df_single_gdp_facet <- tidyr::crossing(
-  df_single_gdp,
-  type = factor(month_order, levels = month_order)
-)
-
-plot_single_models_facet <- ggplot() +
-  annotate(
-    "rect",
-    xmin = params$covid_start,
-    xmax = params$covid_end,
-    ymin = -Inf,
-    ymax = Inf,
-    fill = "grey72",
-    alpha = 0.11
-  ) +
-  geom_line(
-    data = df_single_gdp_facet,
-    aes(x = date, y = GDP, group = type),
-    colour = "black",
-    linewidth = 1.25,
-    linetype = "solid",
-    lineend = "round"
-  ) +
-  geom_line(
-    data = df_single_all,
-    aes(x = date, y = nowcast, colour = model, linetype = model),
-    linewidth = 1.00,
-    alpha = 0.98,
-    lineend = "round"
-  ) +
-  facet_wrap(~ type, ncol = 3) +
-  scale_color_manual(values = model_colors, breaks = model_levels, name = NULL) +
-  scale_linetype_manual(values = model_linetypes, breaks = model_levels, name = NULL) +
-  scale_x_date(
-    breaks = seq(
-      floor_date(min(df_single_all$date, na.rm = TRUE), unit = "year"),
-      floor_date(max(df_single_all$date, na.rm = TRUE), unit = "year"),
-      by = "2 years"
-    ),
-    date_labels = "%Y",
-    expand = expansion(mult = c(0.01, 0.02))
-  ) +
-  labs(
-    title = paste0("Expanding pseudo-real-time nowcasts for ", country_focus_label),
-    x = NULL,
-    y = "GDP growth"
-  ) +
-  theme_country_compare(base_size = 13)
-
-print(plot_single_models_facet)
-
-file_single_png <- file.path(
-  path_final_results,
-  paste0("plot_", country_focus, "_models_by_month_paper_", suffix_out, ".png")
-)
-
-ggsave(
-  filename = file_single_png,
-  plot     = plot_single_models_facet,
-  width    = 12.5,
-  height   = 4.8,
-  dpi      = 500,
-  bg       = "white"
-)
-
-# ------------------------------------------------------------------------------
-# 8.2 Multi-country plot
-# ------------------------------------------------------------------------------
-
-countries_focus <- c("DE", "FR", "IT", "ES")
-# countries_focus <- c("NL", "BE", "AT", "PT")
-
-
-df_multi_all <- dplyr::bind_rows(
-  extract_country_rt_multi(summary_matrix$df_rt_all,    countries_focus, label_matrix),
-  extract_country_rt_multi(summary_vectensor$df_rt_all, countries_focus, label_vecp),
-  extract_country_rt_multi(summary_vector$df_rt_all,    countries_focus, label_vecc),
-  extract_country_rt_multi(summary_dfm$df_rt_all,       countries_focus, label_dfm)
-) %>%
-  dplyr::mutate(
-    model   = factor(model, levels = model_levels),
-    type    = factor(type, levels = month_order),
-    country = factor(country, levels = countries_focus)
+  
+  df_single_gdp_facet <- tidyr::crossing(
+    df_single_gdp,
+    type = factor(month_order, levels = month_order)
   )
+  
+  ylim_single <- get_gdp_ylim(df_single_gdp)
+  
+  p_single <- ggplot() +
+    annotate(
+      "rect",
+      xmin = params$covid_start,
+      xmax = params$covid_end,
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "grey72",
+      alpha = 0.11
+    ) +
+    geom_line(
+      data = df_single_gdp_facet,
+      aes(x = date, y = GDP, group = type),
+      colour = "black",
+      linewidth = 1.25,
+      linetype = "solid",
+      lineend = "round"
+    ) +
+    geom_line(
+      data = df_single_all,
+      aes(x = date, y = nowcast, colour = model, linetype = model),
+      linewidth = 1.00,
+      alpha = 0.98,
+      lineend = "round"
+    ) +
+    facet_wrap(~ type, ncol = 3) +
+    scale_color_manual(values = model_colors, breaks = model_levels, name = NULL) +
+    scale_linetype_manual(values = model_linetypes, breaks = model_levels, name = NULL) +
+    scale_x_date(
+      breaks = seq(
+        floor_date(min(df_single_all$date, na.rm = TRUE), unit = "year"),
+        floor_date(max(df_single_all$date, na.rm = TRUE), unit = "year"),
+        by = "2 years"
+      ),
+      date_labels = "%Y",
+      expand = expansion(mult = c(0.01, 0.02))
+    ) +
+    labs(
+      title = paste0("Expanding pseudo-real-time nowcasts for ", country_focus_label),
+      x = NULL,
+      y = "GDP growth"
+    ) +
+    theme_country_compare(base_size = 13) +
+    coord_cartesian(ylim = ylim_single)
+  
+  print(p_single)
+  
+  file_single_png <- file.path(
+    path_single_country_plots,
+    paste0("plot_", country_focus, "_models_by_month_paper_", suffix_out, ".png")
+  )
+  
+  ggsave(
+    filename = file_single_png,
+    plot     = p_single,
+    width    = 12.5,
+    height   = 4.8,
+    dpi      = 500,
+    bg       = "white"
+  )
+  
+  plot_single_models_by_country[[country_focus]] <- p_single
+  file_single_png_by_country[[country_focus]] <- file_single_png
+}
+# ------------------------------------------------------------------------------
+# 8.2 Multi-country plots: Big 4 and other 4 automatically
+# ------------------------------------------------------------------------------
 
-df_multi_gdp <- extract_country_gdp_multi(
-  summary_matrix$df_yq_eval_all,
-  countries_focus
+country_groups <- list(
+  big4   = c("DE", "FR", "IT", "ES"),
+  other4 = c("NL", "BE", "AT", "PT")
 )
 
-df_multi_gdp_facet <- tidyr::crossing(
-  df_multi_gdp,
-  type = factor(month_order, levels = month_order)
-)
+plot_multi_models_by_group <- list()
+file_multi_png_by_group <- list()
 
-countries_tag  <- paste(countries_focus, collapse = "-")
-countries_text <- paste(countries_focus, collapse = ", ")
-
-plot_multi_models_facet <- ggplot() +
-  annotate(
-    "rect",
-    xmin = params$covid_start,
-    xmax = params$covid_end,
-    ymin = -Inf,
-    ymax = Inf,
-    fill = "grey72",
-    alpha = 0.11
-  ) +
-  geom_line(
-    data = df_multi_gdp_facet,
-    aes(x = date, y = GDP, group = interaction(country, type)),
-    colour = "black",
-    linewidth = 1.20,
-    linetype = "solid",
-    lineend = "round"
-  ) +
-  geom_line(
-    data = df_multi_all,
-    aes(x = date, y = nowcast, colour = model, linetype = model),
-    linewidth = 0.95,
-    alpha = 0.99,
-    lineend = "round"
-  ) +
-  facet_grid(country ~ type, scales = "free_y") +
-  scale_color_manual(values = model_colors, breaks = model_levels, name = NULL) +
-  scale_linetype_manual(values = model_linetypes, breaks = model_levels, name = NULL) +
-  scale_x_date(
-    breaks = seq(
-      floor_date(min(df_multi_all$date, na.rm = TRUE), unit = "year"),
-      floor_date(max(df_multi_all$date, na.rm = TRUE), unit = "year"),
-      by = "2 years"
-    ),
-    date_labels = "%Y",
-    expand = expansion(mult = c(0.01, 0.02))
-  ) +
-  labs(
-    title = "Expanding pseudo-real-time nowcasts",
-    subtitle = paste0("Size = ", Size, ", sel = ", sel, " | Countries: ", countries_text),
-    x = NULL,
-    y = "GDP growth"
-  ) +
-  theme_country_compare(base_size = 10.4)
-
-print(plot_multi_models_facet)
-
-file_multi_png <- file.path(
-  path_final_results,
-  paste0("mcplot_", suffix_out, "_cty-", countries_tag, ".png")
-)
-
-ggsave(
-  filename = file_multi_png,
-  plot     = plot_multi_models_facet,
-  width    = 11.5,
-  height   = 7.2,
-  dpi      = 600,
-  bg       = "white"
-)
-
+for (group_name in names(country_groups)) {
+  
+  countries_focus <- country_groups[[group_name]]
+  
+  df_multi_all <- dplyr::bind_rows(
+    extract_country_rt_multi(summary_matrix$df_rt_all,    countries_focus, label_matrix),
+    extract_country_rt_multi(summary_vectensor$df_rt_all, countries_focus, label_vecp),
+    extract_country_rt_multi(summary_vector$df_rt_all,    countries_focus, label_vecc),
+    extract_country_rt_multi(summary_dfm$df_rt_all,       countries_focus, label_dfm)
+  ) %>%
+    dplyr::mutate(
+      model   = factor(model, levels = model_levels),
+      type    = factor(type, levels = month_order),
+      country = factor(country, levels = countries_focus)
+    )
+  
+  if (nrow(df_multi_all) == 0L) {
+    cat("\nSkipping multi-country plot:", group_name, "- no RT data.\n")
+    next
+  }
+  
+  df_multi_gdp <- extract_country_gdp_multi(
+    summary_matrix$df_yq_eval_all,
+    countries_focus
+  ) %>%
+    dplyr::mutate(country = factor(country, levels = countries_focus))
+  
+  # country-specific y limits based only on true GDP
+  df_ylim_country <- df_multi_gdp %>%
+    dplyr::group_by(country) %>%
+    dplyr::summarise(
+      gdp_min = min(GDP, na.rm = TRUE),
+      gdp_max = max(GDP, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::mutate(
+      pad  = pmax((gdp_max - gdp_min) * 0.05, 0.002),
+      ymin = gdp_min - pad,
+      ymax = gdp_max + pad
+    ) %>%
+    dplyr::select(country, ymin, ymax)
+  
+  # cap forecasts at the country-specific GDP-based limits
+  df_multi_all_plot <- df_multi_all %>%
+    dplyr::left_join(df_ylim_country, by = "country") %>%
+    dplyr::mutate(
+      nowcast_plot = pmin(pmax(nowcast, ymin), ymax)
+    )
+  
+  df_multi_gdp_facet <- tidyr::crossing(
+    df_multi_gdp,
+    type = factor(month_order, levels = month_order)
+  )
+  
+  # force each panel row to use the GDP-based limits of its country
+  df_ylim_blank <- df_ylim_country %>%
+    tidyr::crossing(type = factor(month_order, levels = month_order)) %>%
+    tidyr::pivot_longer(
+      cols = c(ymin, ymax),
+      names_to = "bound",
+      values_to = "GDP"
+    )
+  
+  countries_tag  <- paste(countries_focus, collapse = "-")
+  countries_text <- paste(countries_focus, collapse = ", ")
+  
+  p_multi <- ggplot() +
+    geom_blank(
+      data = df_ylim_blank,
+      aes(x = min(df_multi_all$date, na.rm = TRUE), y = GDP)
+    ) +
+    annotate(
+      "rect",
+      xmin = params$covid_start,
+      xmax = params$covid_end,
+      ymin = -Inf,
+      ymax = Inf,
+      fill = "grey72",
+      alpha = 0.11
+    ) +
+    geom_line(
+      data = df_multi_gdp_facet,
+      aes(x = date, y = GDP, group = interaction(country, type)),
+      colour = "black",
+      linewidth = 1.20,
+      linetype = "solid",
+      lineend = "round"
+    ) +
+    geom_line(
+      data = df_multi_all_plot,
+      aes(x = date, y = nowcast_plot, colour = model, linetype = model),
+      linewidth = 0.95,
+      alpha = 0.99,
+      lineend = "round"
+    ) +
+    facet_grid(country ~ type, scales = "free_y") +
+    scale_color_manual(values = model_colors, breaks = model_levels, name = NULL) +
+    scale_linetype_manual(values = model_linetypes, breaks = model_levels, name = NULL) +
+    scale_x_date(
+      breaks = seq(
+        floor_date(min(df_multi_all$date, na.rm = TRUE), unit = "year"),
+        floor_date(max(df_multi_all$date, na.rm = TRUE), unit = "year"),
+        by = "2 years"
+      ),
+      date_labels = "%Y",
+      expand = expansion(mult = c(0.01, 0.02))
+    ) +
+    labs(
+      title = "Expanding pseudo-real-time nowcasts",
+      subtitle = paste0("Size = ", Size, ", sel = ", sel, " | Countries: ", countries_text),
+      x = NULL,
+      y = "GDP growth"
+    ) +
+    theme_country_compare(base_size = 10.4)
+  
+  print(p_multi)
+  
+  file_multi_png <- file.path(
+    path_final_results,
+    paste0("mcplot_", suffix_out, "_group-", group_name, "_cty-", countries_tag, ".png")
+  )
+  
+  ggsave(
+    filename = file_multi_png,
+    plot     = p_multi,
+    width    = 11.5,
+    height   = 7.2,
+    dpi      = 600,
+    bg       = "white"
+  )
+  
+  plot_multi_models_by_group[[group_name]] <- p_multi
+  file_multi_png_by_group[[group_name]] <- file_multi_png
+}
 # ==============================================================================
 # 9. MODEL-SPECIFIC LATEX TABLES
 # ==============================================================================
@@ -1412,9 +1542,14 @@ if (!is.null(latex_factor_fit)) {
 
 saveRDS(
   list(
-    Size                = Size,
-    sel                 = sel,
-    params              = params,
+    Size = Size,
+    sel  = sel,
+    
+    proxy_mode           = proxy_mode,
+    matrix_proxy_label   = matrix_proxy_label,
+    matrix_display_label = matrix_display_label,
+    
+    params = params,
     run_factor_analysis = run_factor_analysis,
     
     run_matrix_factor_diagnostics  = run_matrix_factor_diagnostics,
@@ -1478,10 +1613,11 @@ saveRDS(
     plot_factor_compare       = plot_factor_compare,
     file_graph_factor_compare = file_graph_factor_compare,
     
-    plot_single_models_facet = plot_single_models_facet,
-    file_single_png          = file_single_png,
-    plot_multi_models_facet  = plot_multi_models_facet,
-    file_multi_png           = file_multi_png,
+    plot_single_models_by_country = plot_single_models_by_country,
+    file_single_png_by_country    = file_single_png_by_country,
+    
+    plot_multi_models_by_group    = plot_multi_models_by_group,
+    file_multi_png_by_group       = file_multi_png_by_group,
     
     latex_factor_fit                    = latex_factor_fit,
     latex_comp_insample                 = latex_comp_insample,
@@ -1497,5 +1633,4 @@ saveRDS(
 )
 
 cat("\nAll final outputs saved to:\n", path_final_results, "\n")
-
 

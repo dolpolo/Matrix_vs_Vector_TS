@@ -112,9 +112,9 @@ params <- list(
   target       = "GDP",
   target_cc    = "EA",
   
-  sel_method   = "corr",
-  n_m          = 30,
-  n_q          = 30,
+  sel_method   = "LASSO",
+  n_m          = 25,
+  n_q          = 15,
   thr_m        = 0.10,
   thr_q        = 0.85,
   thr_F_test   = 0.01,
@@ -133,7 +133,7 @@ params <- list(
 )
 
 countries <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
-country   <- "IT"
+country   <- "AT"
 
 tag_run <- build_run_tag(params)
 model_name <- "vectensor_country"
@@ -159,6 +159,34 @@ data   <- tensor_to_vector(X_tens = tensor$Y, N_m = tensor$n_M, N_q = tensor$n_Q
 # Optional diagnostic
 nan_percent_Y(tensor$Y)
 
+selection_end_pre  <- params$start_eval %m-% months(1)
+selection_end_post <- params$covid_end
+
+all_countries_rt_pre <- prepare_all_countries(
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  covid_mask_m  = params$covid_mask_m,
+  covid_mask_q  = params$covid_mask_q,
+  selection_end = selection_end_pre
+)
+
+tensor_pre <- build_tensor(all_countries_rt_pre, params, var_scope = "union")
+data_pre <- tensor_to_vector(X_tens = tensor_pre$Y, N_m = tensor_pre$n_M, N_q = tensor_pre$n_Q)
+
+all_countries_rt_post <- prepare_all_countries(
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  covid_mask_m  = params$covid_mask_m,
+  covid_mask_q  = params$covid_mask_q,
+  selection_end = selection_end_post
+)
+
+tensor_post <- build_tensor(all_countries_rt_post, params, var_scope = "union")
+data_post <- tensor_to_vector(X_tens = tensor_post$Y, N_m = tensor_post$n_M, N_q = tensor_post$n_Q)
 # ==============================================================================
 # 6. SOURCE VECTOR FUNCTIONS
 # ==============================================================================
@@ -259,10 +287,30 @@ cat("\nSaved full-sample results to:\n", file_fit, "\n")
 # 10. SINGLE-COUNTRY PSEUDO REAL-TIME NOWCASTING
 # ==============================================================================
 
-rt_single <- run_country_mf_tprf_rt(
-  country_inputs = country_inputs,
-  params         = params
+regime_data_pre <- make_vector_regime_data_from_tensor(
+  tensor        = tensor_pre,
+  data          = data_pre,
+  country       = country,
+  params        = params,
+  label         = "pre_evaluation_selection",
+  selection_end = selection_end_pre
 )
+
+regime_data_post <- make_vector_regime_data_from_tensor(
+  tensor        = tensor_post,
+  data          = data_post,
+  country       = country,
+  params        = params,
+  label         = "post_covid_selection",
+  selection_end = selection_end_post
+)
+
+rt_single <- run_country_mf_tprf_rt(
+  regime_data_pre  = regime_data_pre,
+  regime_data_post = regime_data_post,
+  params           = params
+)
+
 
 # ==============================================================================
 # 11. SAVE SINGLE-COUNTRY PSEUDO REAL-TIME RESULTS
@@ -310,6 +358,21 @@ saveRDS(
     dates_m  = country_inputs$dates_m,
     dates_q  = country_inputs$dates_q,
     y_q      = country_inputs$y_q,
+    
+    selection_protocol = list(
+      full_sample = list(selection_end = params$end_eval),
+      pre = list(
+        label = regime_data_pre$label,
+        selection_end = regime_data_pre$selection_end
+      ),
+      post = list(
+        label = regime_data_post$label,
+        selection_end = regime_data_post$selection_end
+      )
+    ),
+    regime_info = rt_single$raw$regime_info,
+    vintage_log = rt_single$raw$vintage_log,
+    
     pseudo_realtime_raw = rt_single$raw,
     pseudo_realtime_M1  = rt_single$M1,
     pseudo_realtime_M2  = rt_single$M2,

@@ -175,13 +175,12 @@ LASSO_select <- function(y, X, lambda, K, alpha = 1) {
 # Selects variables most correlated with GDP for each country.
 # Returns base (country-independent) names for monthly and quarterly datasets.
 
-select_vars <- function(countries, params, path_raw, path_adj) {
+select_vars <- function(countries, params, path_raw, path_adj,
+                        selection_end = params$end_eval) {
+  start_lim <- params$start_est
+  end_lim   <- selection_end
   
   target <- params$target
-  
-  # dates limits
-  start_lim <- params$start_est
-  end_lim   <- params$end_eval
   
   sel_m <- list()
   sel_q <- list()
@@ -549,11 +548,11 @@ prepare_country_data <- function(cc, params, sel_m, sel_q, path_raw, path_adj,
 
 
 prepare_all_countries <- function(countries, params, path_raw, path_adj,
-                                  covid_mask=TRUE, covid_mask_m, covid_mask_q) {
+                                  covid_mask=TRUE, covid_mask_m, covid_mask_q, selection_end = params$end_eval) {
   
   # 1. variable selection country-by-country
-  vars_sel <- select_vars(countries, params, path_raw, path_adj)
-  
+  vars_sel <- select_vars(countries, params, path_raw, path_adj, selection_end = selection_end)
+
   # 2. prepare each country
   out <- lapply(countries, function(cc) {
     prepare_country_data(

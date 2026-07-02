@@ -79,7 +79,7 @@ params <- list(
   
   target       = "GDP",
   
-  sel_method   = "LASSO",  # "corr" | "LASSO"
+  sel_method   = "corr",  # "corr" | "LASSO"
   n_m          = 20,
   n_q          = 5,
   thr_m        = 0.10,
@@ -99,7 +99,7 @@ params <- list(
   nw_lag       = 1
 )
 
-countries <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
+countries <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
 country   <- "IT"
 
 tag_run <- build_run_tag(params)
@@ -112,6 +112,7 @@ sel        <- params$sel_method
 # 4. PREPARE DATA FOR ALL COUNTRIES
 # ==============================================================================
 
+# Full-sample selection: used only for in-sample/full-sample fit
 all_countries <- prepare_all_countries(
   countries    = countries,
   params       = params,
@@ -121,15 +122,43 @@ all_countries <- prepare_all_countries(
   covid_mask_q = params$covid_mask_q
 )
 
+# Real-time selection protocol
+selection_end_pre  <- params$start_eval %m-% months(1)
+selection_end_post <- params$covid_end
+
+all_countries_rt_pre <- prepare_all_countries(
+  countries      = countries,
+  params         = params,
+  path_raw       = path_data_raw,
+  path_adj       = path_data_adj,
+  covid_mask_m   = params$covid_mask_m,
+  covid_mask_q   = params$covid_mask_q,
+  selection_end  = selection_end_pre
+)
+
+all_countries_rt_post <- prepare_all_countries(
+  countries      = countries,
+  params         = params,
+  path_raw       = path_data_raw,
+  path_adj       = path_data_adj,
+  covid_mask_m   = params$covid_mask_m,
+  covid_mask_q   = params$covid_mask_q,
+  selection_end  = selection_end_post
+)
+
 # ==============================================================================
 # 5. CROSS-COUNTRY PIPELINE
 # ==============================================================================
 
 results_all <- run_all_countries_mf_tprf(
-  countries     = countries,
-  all_countries = all_countries,
-  params        = params,
-  path_results  = path_results
+  countries              = countries,
+  all_countries          = all_countries,
+  all_countries_rt_pre   = all_countries_rt_pre,
+  all_countries_rt_post  = all_countries_rt_post,
+  selection_end_pre      = selection_end_pre,
+  selection_end_post     = selection_end_post,
+  params                 = params,
+  path_results           = path_results
 )
 
 summary_all <- lapply(names(results_all), function(cc) {
@@ -300,6 +329,11 @@ saveRDS(
       full = x$hyper_full,
       rt   = x$hyper_rt
     )),
+    selection_protocol = list(
+      full_sample = list(selection_end = params$end_eval),
+      pre         = list(selection_end = selection_end_pre),
+      post        = list(selection_end = selection_end_post)
+    ),
     hyper_full_all         = cross_out$hyper_full_all,
     hyper_rt_pre_all       = cross_out$hyper_rt_pre_all,
     hyper_rt_post_all      = cross_out$hyper_rt_post_all,

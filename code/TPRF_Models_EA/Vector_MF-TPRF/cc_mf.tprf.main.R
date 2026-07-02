@@ -106,7 +106,7 @@ params <- list(
   
   target       = "GDP",
   
-  sel_method   = "LASSO",
+  sel_method   = "corr",
   n_m          = 20,
   n_q          = 5,
   thr_m        = 0.10,
@@ -330,16 +330,51 @@ cat("\nSaved full-sample results to:\n", file_fit, "\n")
 # 11. PSEUDO REAL-TIME NOWCASTING
 # ==============================================================================
 
+# Prepare regimes
+selection_end_pre  <- params$start_eval %m-% months(1)
+selection_end_post <- params$covid_end
+
+all_countries_rt_pre <- prepare_all_countries(
+  countries = countries,
+  params = params,
+  path_raw = path_data_raw,
+  path_adj = path_data_adj,
+  covid_mask_m = params$covid_mask_m,
+  covid_mask_q = params$covid_mask_q,
+  selection_end = selection_end_pre
+)
+
+all_countries_rt_post <- prepare_all_countries(
+  countries = countries,
+  params = params,
+  path_raw = path_data_raw,
+  path_adj = path_data_adj,
+  covid_mask_m = params$covid_mask_m,
+  covid_mask_q = params$covid_mask_q,
+  selection_end = selection_end_post
+)
+
+regime_data_pre <- make_vector_regime_data(
+  all_countries = all_countries_rt_pre,
+  country       = country,
+  params        = params,
+  label         = "pre_evaluation_selection",
+  selection_end = selection_end_pre
+)
+
+regime_data_post <- make_vector_regime_data(
+  all_countries = all_countries_rt_post,
+  country       = country,
+  params        = params,
+  label         = "post_covid_selection",
+  selection_end = selection_end_post
+)
+
+# Expanding Nowcast exercise
 pseudo_realtime_raw <- pseudo_realtime_MF_TPRF_XP(
-  X_full  = X,
-  y_q     = y_q,
-  params  = params,
-  dates   = dates_m,
-  dates_q = dates_q,
-  Freq    = Freq,
-  Unb     = Unb,
-  agg_m   = agg_m,
-  agg_q   = agg_q,
+  params = params,
+  regime_data_pre = regime_data_pre,
+  regime_data_post = regime_data_post,
   do_post_covid_recalibration = TRUE,
   user_hyper_pre  = list(r_impute = NULL, Lproxy = NULL, p_AR = NULL, L_midas = NULL),
   user_hyper_post = list(r_impute = NULL, Lproxy = NULL, p_AR = NULL, L_midas = NULL),

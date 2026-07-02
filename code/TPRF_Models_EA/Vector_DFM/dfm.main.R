@@ -497,16 +497,47 @@ cat("\nSaved full-sample DFM results to:\n", file_fit, "\n")
 # 13. PSEUDO REAL-TIME NOWCASTING (DFM)
 # ==============================================================================
 
+selection_end_pre  <- params$start_eval %m-% months(1)
+selection_end_post <- params$covid_end
+
+all_countries_rt_pre <- prepare_all_countries(
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  covid_mask_m  = params$covid_mask_m,
+  covid_mask_q  = params$covid_mask_q,
+  selection_end = selection_end_pre
+)
+
+all_countries_rt_post <- prepare_all_countries(
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  covid_mask_m  = params$covid_mask_m,
+  covid_mask_q  = params$covid_mask_q,
+  selection_end = selection_end_post
+)
+
+regime_data_pre <- make_dfm_regime_data(
+  all_countries  = all_countries_rt_pre,
+  country        = country,
+  label          = "pre_evaluation_selection",
+  selection_end  = selection_end_pre
+)
+
+regime_data_post <- make_dfm_regime_data(
+  all_countries  = all_countries_rt_post,
+  country        = country,
+  label          = "post_covid_selection",
+  selection_end  = selection_end_post
+)
+
 pseudo_realtime_raw <- pseudo_realtime_DFM_EM_reestimate(
-  X_full   = data,
-  NQ       = NQ,
-  params   = params,
-  dates_m  = dates_m,
-  dates_q  = dates_q,
-  Freq     = Freq,
-  Unb      = Unb,
-  gdp_col  = gdp_col,
-  agg      = agg,
+  regime_data_pre  = regime_data_pre,
+  regime_data_post = regime_data_post,
+  params           = params,
   do_post_covid_recalibration = TRUE,
   user_hyper_pre  = list(r = NULL, p = NULL, q = NULL),
   user_hyper_post = list(r = NULL, p = NULL, q = NULL),

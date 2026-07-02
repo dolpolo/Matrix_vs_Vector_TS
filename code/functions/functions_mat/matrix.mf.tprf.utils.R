@@ -1448,8 +1448,9 @@ save_selection_wide_to_latex <- function(df_selection_wide,
                                          file,
                                          caption = "Variables selected by country",
                                          label = "tab:variables_selected_by_country",
-                                         country_cols = country_order,
-                                         check_symbol = "\\checkmark") {
+                                         country_cols = NULL,
+                                         check_symbol = "\\checkmark",
+                                         exclude_cols = "EA") {
   
   if (!is.data.frame(df_selection_wide)) {
     stop("df_selection_wide must be a data.frame.")
@@ -1457,21 +1458,37 @@ save_selection_wide_to_latex <- function(df_selection_wide,
   
   df <- df_selection_wide
   
-  required_cols <- c(
-    "base_name",
-    "frequency",
-    "model_size",
-    country_cols
-  )
+  meta_cols <- c("base_name", "frequency", "model_size")
   
-  missing_cols <- setdiff(required_cols, names(df))
-  
-  if (length(missing_cols) > 0L) {
+  missing_meta <- setdiff(meta_cols, names(df))
+  if (length(missing_meta) > 0L) {
     stop(
-      "Missing columns in df_selection_wide: ",
-      paste(missing_cols, collapse = ", ")
+      "Missing metadata columns in df_selection_wide: ",
+      paste(missing_meta, collapse = ", ")
     )
   }
+  
+  if (is.null(country_cols)) {
+    
+    preferred_order <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
+    
+    country_cols <- intersect(preferred_order, names(df))
+    
+    if (length(country_cols) == 0L) {
+      country_cols <- setdiff(names(df), c(meta_cols, exclude_cols))
+    }
+    
+  } else {
+    
+    country_cols <- setdiff(country_cols, exclude_cols)
+    country_cols <- intersect(country_cols, names(df))
+  }
+  
+  if (length(country_cols) == 0L) {
+    stop("No country-specific columns found in df_selection_wide.")
+  }
+  
+  df <- df[, c(meta_cols, country_cols), drop = FALSE]
   
   df <- df[order(df$frequency, df$base_name), ]
   
@@ -1517,7 +1534,7 @@ save_selection_wide_to_latex <- function(df_selection_wide,
   )
   
   body <- apply(
-    df[, c("base_name", "frequency", "model_size", country_cols)],
+    df[, c("base_name", "frequency", "model_size", country_cols), drop = FALSE],
     1,
     function(row) paste0(paste(row, collapse = " & "), " \\\\")
   )
@@ -1537,6 +1554,746 @@ save_selection_wide_to_latex <- function(df_selection_wide,
   writeLines(latex_code, con = file)
   
   invisible(latex_code)
+}
+
+# ==============================================================================
+# DATED PREDICTOR-SELECTION REPORT
+# ==============================================================================
+
+load_fit_by_size <- function(
+    Size,
+    path_results,
+    model_name,
+    sel_method
+) {
+  
+  file_fit <- find_result_file(
+    path  = path_results,
+    model = model_name,
+    stage = "fit",
+    Size  = Size,
+    sel   = sel_method
+  )
+  
+  message("\nLoaded ", Size, " fit from:\n", file_fit)
+  
+  fit_i <- readRDS(file_fit)
+  
+  if (is.null(fit_i$params) || is.null(fit_i$countries)) {
+    stop(
+      "Fit object for Size = ", Size,
+      " must contain both `params` and `countries`."
+    )
+  }
+  
+  fit_method <- tolower(
+    as.character(fit_i$params$sel_method)[1L]
+  )
+  
+  if (!identical(fit_method, tolower(sel_method))) {
+    stop(
+      "Selection method mismatch for Size = ", Size, ". ",
+      "Expected `", sel_method,
+      "`, found `", fit_i$params$sel_method, "`."
+    )
+  }
+  
+  fit_i
+}
+
+
+check_common_fit_settings <- function(fit_results) {
+  
+  fields_to_check <- c(
+    "start_eval",
+    "covid_end",
+    "target",
+    "target_cc",
+    "sel_method"
+  )
+  
+  for (field_i in fields_to_check) {
+    
+    values_i <- vapply(
+      fit_results,
+      function(x) {
+        
+        if (!field_i %in% names(x$params)) {
+          return(NA_character_)
+        }
+        
+        paste(
+          as.character(x$params[[field_i]]),
+          collapse = "|"
+        )
+      },
+      character(1)
+    )
+    
+    if (anyNA(values_i)) {
+      stop(
+        "Missing parameter `", field_i,
+        "` in at least one fitted object."
+      )
+    }
+    
+    if (length(unique(values_i)) != 1L) {
+      stop(
+        "Fitted objects differ in parameter `", field_i, "`: ",
+        paste(
+          names(values_i),
+          values_i,
+          sep = " = ",
+          collapse = "; "
+        )
+      )
+    }
+  }
+  
+  reference_countries <- as.character(
+    fit_results[[1L]]$countries
+  )
+  
+  same_countries <- vapply(
+    fit_results,
+    function(x) {
+      identical(
+        as.character(x$countries),
+        reference_countries
+      )
+    },
+    logical(1)
+  )
+  
+  if (!all(same_countries)) {
+    stop("Fitted objects do not use the same country set.")
+  }
+  
+  invisible(TRUE)
+}
+
+
+rebuild_selection_regime <- function(
+    res_fit,
+    Size,
+    selection_end,
+    active_from,
+    regime_name,
+    path_data_raw,
+    path_data_adj
+) {
+  
+  if (!"selection_end" %in% names(formals(prepare_all_countries))) {
+    stop(
+      "`prepare_all_countries()` must include a `selection_end` argument. ",
+      "Update this function in matrix.mf.tprf.prep.R before running ",
+      "dated selection reporting."
+    )
+  }
+  
+  params_i    <- res_fit$params
+  countries_i <- res_fit$countries
+  
+  all_countries_i <- prepare_all_countries(
+    countries     = countries_i,
+    params        = params_i,
+    path_raw      = path_data_raw,
+    path_adj      = path_data_adj,
+    covid_mask_m  = params_i$covid_mask_m,
+    covid_mask_q  = params_i$covid_mask_q,
+    selection_end = as.Date(selection_end)
+  )
+  
+  selections_i <- selection_to_df(
+    all_countries_i,
+    params_i
+  )
+  
+  wide_i <- selection_to_wide(
+    selections_i
+  )
+  
+  predictors_i <- selections_i |>
+    dplyr::filter(
+      tolower(as.character(base_name)) !=
+        tolower(as.character(params_i$target))
+    )
+  
+  n_monthly_predictors <- predictors_i |>
+    dplyr::filter(frequency == "M") |>
+    dplyr::distinct(base_name) |>
+    nrow()
+  
+  n_quarterly_predictors <- predictors_i |>
+    dplyr::filter(frequency == "Q") |>
+    dplyr::distinct(base_name) |>
+    nrow()
+  
+  dimensions_i <- tibble::tibble(
+    regime               = regime_name,
+    size                 = Size,
+    selection_end        = as.Date(selection_end),
+    active_from          = as.Date(active_from),
+    monthly_predictors   = n_monthly_predictors,
+    quarterly_predictors = n_quarterly_predictors
+  )
+  
+  list(
+    selections    = selections_i,
+    wide          = wide_i,
+    dimensions    = dimensions_i,
+    all_countries = all_countries_i
+  )
+}
+
+
+rebuild_regime_all_sizes <- function(
+    fit_results,
+    selection_end,
+    active_from,
+    regime_name,
+    path_data_raw,
+    path_data_adj
+) {
+  
+  out <- lapply(
+    names(fit_results),
+    function(Size) {
+      
+      rebuild_selection_regime(
+        res_fit       = fit_results[[Size]],
+        Size          = Size,
+        selection_end = selection_end,
+        active_from   = active_from,
+        regime_name   = regime_name,
+        path_data_raw = path_data_raw,
+        path_data_adj = path_data_adj
+      )
+    }
+  )
+  
+  names(out) <- names(fit_results)
+  
+  out
+}
+
+
+compare_two_selections <- function(
+    sel_initial,
+    sel_updated,
+    Size,
+    target_name
+) {
+  
+  initial_tbl <- sel_initial |>
+    dplyr::filter(
+      tolower(as.character(base_name)) !=
+        tolower(as.character(target_name))
+    ) |>
+    dplyr::distinct(
+      country,
+      base_name,
+      frequency
+    ) |>
+    dplyr::mutate(
+      selected_initial = 1L
+    )
+  
+  updated_tbl <- sel_updated |>
+    dplyr::filter(
+      tolower(as.character(base_name)) !=
+        tolower(as.character(target_name))
+    ) |>
+    dplyr::distinct(
+      country,
+      base_name,
+      frequency
+    ) |>
+    dplyr::mutate(
+      selected_updated = 1L
+    )
+  
+  dplyr::full_join(
+    initial_tbl,
+    updated_tbl,
+    by = c("country", "base_name", "frequency")
+  ) |>
+    dplyr::mutate(
+      selected_initial = dplyr::coalesce(
+        selected_initial,
+        0L
+      ),
+      
+      selected_updated = dplyr::coalesce(
+        selected_updated,
+        0L
+      ),
+      
+      status = dplyr::case_when(
+        selected_initial == 1L &
+          selected_updated == 1L ~ "Retained",
+        
+        selected_initial == 0L &
+          selected_updated == 1L ~ "Added",
+        
+        selected_initial == 1L &
+          selected_updated == 0L ~ "Dropped"
+      ),
+      
+      size = Size
+    )
+}
+
+
+build_dated_selection_report <- function(config) {
+  
+  required_config <- c(
+    "model",
+    "sel_method",
+    "sizes",
+    "countries",
+    "path_results",
+    "path_data_raw",
+    "path_data_adj"
+  )
+  
+  missing_config <- setdiff(
+    required_config,
+    names(config)
+  )
+  
+  if (length(missing_config) > 0L) {
+    stop(
+      "Missing config entries: ",
+      paste(missing_config, collapse = ", ")
+    )
+  }
+  
+  size_order <- c("small", "medium", "large")
+  
+  sizes <- tolower(
+    as.character(config$sizes)
+  )
+  
+  if (!setequal(sizes, size_order)) {
+    stop(
+      "`config$sizes` must contain exactly: ",
+      paste(size_order, collapse = ", ")
+    )
+  }
+  
+  fit_results <- lapply(
+    size_order,
+    function(Size) {
+      
+      load_fit_by_size(
+        Size         = Size,
+        path_results = config$path_results,
+        model_name   = config$model,
+        sel_method   = config$sel_method
+      )
+    }
+  )
+  
+  names(fit_results) <- size_order
+  
+  check_common_fit_settings(fit_results)
+  
+  params_ref <- fit_results$small$params
+  
+  model_countries <- setdiff(
+    as.character(fit_results$small$countries),
+    as.character(params_ref$target_cc)
+  )
+  
+  if (!setequal(
+    model_countries,
+    as.character(config$countries)
+  )) {
+    stop(
+      "`config$countries` does not match the non-target countries ",
+      "stored in the fitted object."
+    )
+  }
+  
+  selection_end_initial <- as.Date(
+    params_ref$start_eval %m-% lubridate::period(1, "month")
+  )
+  
+  selection_end_updated <- as.Date(
+    params_ref$covid_end
+  )
+  
+  initial_regime_start <- as.Date(
+    params_ref$start_eval
+  )
+  
+  updated_regime_start <- as.Date(
+    selection_end_updated %m+% lubridate::period(1, "month")
+  )
+  
+  
+  message(
+    "\nInitial screening sample ends: ",
+    format(selection_end_initial, "%Y-%m-%d"),
+    "\nInitial regime begins: ",
+    format(initial_regime_start, "%Y-%m-%d"),
+    "\n\nPost-COVID screening sample ends: ",
+    format(selection_end_updated, "%Y-%m-%d"),
+    "\nUpdated regime begins: ",
+    format(updated_regime_start, "%Y-%m-%d"),
+    "\n"
+  )
+  
+  initial <- rebuild_regime_all_sizes(
+    fit_results   = fit_results,
+    selection_end = selection_end_initial,
+    active_from   = initial_regime_start,
+    regime_name   = "Pre-evaluation",
+    path_data_raw = config$path_data_raw,
+    path_data_adj = config$path_data_adj
+  )
+  
+  updated <- rebuild_regime_all_sizes(
+    fit_results   = fit_results,
+    selection_end = selection_end_updated,
+    active_from   = updated_regime_start,
+    regime_name   = "Post-COVID",
+    path_data_raw = config$path_data_raw,
+    path_data_adj = config$path_data_adj
+  )
+  
+  # ---------------------------------------------------------------------------
+  # Predictor-set dimensions.
+  # ---------------------------------------------------------------------------
+  
+  dimension_list <- unname(
+    c(
+      lapply(initial, function(x) x$dimensions),
+      lapply(updated, function(x) x$dimensions)
+    )
+  )
+  
+  if (any(vapply(dimension_list, is.null, logical(1)))) {
+    stop(
+      "At least one rebuilt selection regime does not contain a `dimensions` table."
+    )
+  }
+  
+  predictor_dimensions <- dplyr::bind_rows(dimension_list)
+  
+  required_dimension_cols <- c(
+    "regime",
+    "size",
+    "selection_end",
+    "active_from",
+    "monthly_predictors",
+    "quarterly_predictors"
+  )
+  
+  missing_dimension_cols <- setdiff(
+    required_dimension_cols,
+    names(predictor_dimensions)
+  )
+  
+  if (length(missing_dimension_cols) > 0L) {
+    stop(
+      "The predictor-dimension table is missing: ",
+      paste(missing_dimension_cols, collapse = ", ")
+    )
+  }
+  
+  predictor_dimensions <- predictor_dimensions |>
+    dplyr::mutate(
+      regime = factor(
+        as.character(regime),
+        levels = c("Pre-evaluation", "Post-COVID")
+      ),
+      size = factor(
+        as.character(size),
+        levels = size_order
+      )
+    ) |>
+    dplyr::arrange(
+      regime,
+      size
+    )
+  
+  selection_transition <- dplyr::bind_rows(
+    lapply(
+      size_order,
+      function(Size) {
+        
+        compare_two_selections(
+          sel_initial = initial[[Size]]$selections,
+          sel_updated = updated[[Size]]$selections,
+          Size        = Size,
+          target_name = params_ref$target
+        )
+      }
+    )
+  ) |>
+    dplyr::mutate(
+      size = factor(
+        size,
+        levels = size_order
+      ),
+      
+      frequency = factor(
+        frequency,
+        levels = c("M", "Q")
+      )
+    ) |>
+    dplyr::arrange(
+      size,
+      frequency,
+      country,
+      base_name
+    )
+  
+  selection_turnover <- selection_transition |>
+    dplyr::group_by(
+      size,
+      frequency
+    ) |>
+    dplyr::summarise(
+      pre_selected  = sum(selected_initial),
+      retained      = sum(status == "Retained"),
+      added         = sum(status == "Added"),
+      dropped       = sum(status == "Dropped"),
+      post_selected = sum(selected_updated),
+      
+      jaccard = retained / (
+        retained + added + dropped
+      ),
+      
+      .groups = "drop"
+    ) |>
+    dplyr::arrange(
+      size,
+      frequency
+    )
+  
+  list(
+    config = config,
+    
+    dates = list(
+      selection_end_initial = selection_end_initial,
+      selection_end_updated = selection_end_updated,
+      initial_regime_start  = initial_regime_start,
+      updated_regime_start  = updated_regime_start
+    ),
+    
+    fit_results = fit_results,
+    
+    initial = initial,
+    updated = updated,
+    
+    predictor_dimensions = predictor_dimensions,
+    selection_transition = selection_transition,
+    selection_turnover   = selection_turnover
+  )
+}
+
+# ==============================================================================
+# 1. COMMON HELPERS FOR SELECTION REPORTING
+# ==============================================================================
+
+country_order <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT")
+
+
+find_result_file <- function(
+    path,
+    model,
+    stage,
+    Size,
+    sel,
+    ext = "rds"
+) {
+  
+  pattern <- paste0(
+    "^", stage,
+    "_", model,
+    "_Size-", Size,
+    "_sel-", sel,
+    ".*\\.", ext, "$"
+  )
+  
+  files <- list.files(
+    path       = path,
+    pattern    = pattern,
+    full.names = TRUE
+  )
+  
+  if (length(files) == 0L) {
+    stop(
+      "No file found for model = ", model,
+      ", stage = ", stage,
+      ", Size = ", Size,
+      ", sel = ", sel,
+      ", path = ", path
+    )
+  }
+  
+  if (length(files) > 1L) {
+    message("Multiple matching files found. Using the most recent one.")
+    
+    files <- files[
+      order(
+        file.info(files)$mtime,
+        decreasing = TRUE
+      )
+    ]
+  }
+  
+  files[1L]
+}
+
+
+format_month_year <- function(x) {
+  format(as.Date(x), "%b %Y")
+}
+
+
+escape_latex <- function(x) {
+  
+  x <- as.character(x)
+  
+  x <- gsub(
+    "\\\\",
+    "\\\\textbackslash{}",
+    x
+  )
+  
+  gsub(
+    "([#$%&_{}])",
+    "\\\\\\1",
+    x,
+    perl = TRUE
+  )
+}
+
+
+normalize_selection_ids <- function(df) {
+  
+  if (!is.data.frame(df)) {
+    stop("Input object must be a data.frame.")
+  }
+  
+  if (!"base_name" %in% names(df)) {
+    stop("Column `base_name` is missing.")
+  }
+  
+  df |>
+    dplyr::mutate(
+      base_name = dplyr::recode(
+        as.character(base_name),
+        "TASS.LBD" = "TASS.LDB",
+        "TLB.LBD"  = "TLB.LDB",
+        .default   = as.character(base_name)
+      )
+    )
+}
+
+
+combine_size_codes <- function(s, m, l) {
+  
+  vapply(
+    seq_along(s),
+    function(i) {
+      
+      labels_i <- c(
+        if (isTRUE(s[i] == 1)) "S",
+        if (isTRUE(m[i] == 1)) "M",
+        if (isTRUE(l[i] == 1)) "L"
+      )
+      
+      if (length(labels_i) == 0L) {
+        ""
+      } else {
+        paste(labels_i, collapse = "/")
+      }
+    },
+    character(1)
+  )
+}
+
+
+build_selection_size_table <- function(
+    sel_small,
+    sel_medium,
+    sel_large,
+    country_cols = country_order
+) {
+  
+  key_cols <- c("base_name", "frequency")
+  
+  selections <- list(
+    small  = sel_small,
+    medium = sel_medium,
+    large  = sel_large
+  )
+  
+  for (name_i in names(selections)) {
+    
+    missing_cols <- setdiff(
+      c(key_cols, country_cols),
+      names(selections[[name_i]])
+    )
+    
+    if (length(missing_cols) > 0L) {
+      stop(
+        "Missing columns in `sel_", name_i, "`: ",
+        paste(missing_cols, collapse = ", ")
+      )
+    }
+  }
+  
+  sel_small  <- normalize_selection_ids(sel_small)
+  sel_medium <- normalize_selection_ids(sel_medium)
+  sel_large  <- normalize_selection_ids(sel_large)
+  
+  make_size_table <- function(df, suffix) {
+    
+    df |>
+      dplyr::select(
+        dplyr::all_of(key_cols),
+        dplyr::all_of(country_cols)
+      ) |>
+      dplyr::rename_with(
+        ~ paste0(.x, suffix),
+        dplyr::all_of(country_cols)
+      )
+  }
+  
+  out <- make_size_table(sel_small, "_S") |>
+    dplyr::full_join(
+      make_size_table(sel_medium, "_M"),
+      by = key_cols
+    ) |>
+    dplyr::full_join(
+      make_size_table(sel_large, "_L"),
+      by = key_cols
+    )
+  
+  for (cc in country_cols) {
+    
+    out[[cc]] <- combine_size_codes(
+      out[[paste0(cc, "_S")]],
+      out[[paste0(cc, "_M")]],
+      out[[paste0(cc, "_L")]]
+    )
+  }
+  
+  out |>
+    dplyr::select(
+      dplyr::all_of(key_cols),
+      dplyr::all_of(country_cols)
+    ) |>
+    dplyr::arrange(
+      frequency,
+      base_name
+    )
 }
 
 # ==============================================================================
@@ -1565,6 +2322,7 @@ build_metadata_table <- function() {
     "HPRC",       "Residential Property Prices (BIS)",                                      "N", "H", 1, "Q", 45, "National Accounts / Real Economy",
     "GNFCPS",     "Gross Profit Share of Non-Financial Corporations",                       "R", "H", 1, "Q", 45, "National Accounts / Real Economy",
     "GNFCIR",     "Gross Investment Share of Non-Financial Corporations",                   "R", "H", 1, "Q", 45, "National Accounts / Real Economy",
+    "GHIR",       "Gross Investment Rate of Households",                                    "R", "H", 5, "Q", 45, "National Accounts / Real Economy",
     "GHSR",       "Gross Households Savings Rate",                                          "R", "H", 1, "Q", 45, "National Accounts / Real Economy",
     
     # Labor Market
@@ -1599,26 +2357,34 @@ build_metadata_table <- function() {
     "TLB.LDB",    "Total Economy - Liabilities: Long-Term Debt Securities",                 "F", "H", 1, "Q", 45, "Credit Aggregates",
     "TLB.SLN",    "Total Economy - Liabilities: Short-Term Loans",                          "F", "H", 1, "Q", 45, "Credit Aggregates",
     "TLB.LLN",    "Total Economy - Liabilities: Long-Term Loans",                           "F", "H", 1, "Q", 45, "Credit Aggregates",
+    "NFCASS",     "Non-Financial Corporations: Total Financial Assets",              "F", "H", 1, "Q", 45, "Credit Aggregates",
     "NFCLB.SLN",  "Non-Financial Corporations - Liabilities - Short-Term Loans",            "F", "H", 1, "Q", 45, "Credit Aggregates",
     "NFCLB.LLN",  "Non-Financial Corporations - Liabilities - Long-Term Loans",             "F", "H", 1, "Q", 45, "Credit Aggregates",
+    "NFCASS.SLN", "Non-Financial Corporations - Assets: Short-Term Loans",           "F", "H", 1, "Q", 45, "Credit Aggregates",
+    "NFCASS.LLN", "Non-Financial Corporations - Assets: Long-Term Loans",            "F", "H", 1, "Q", 45, "Credit Aggregates",
+    "NFCLB",      "Non-Financial Corporations: Total Financial Liabilities",         "F", "H", 1, "Q", 45, "Credit Aggregates",
+    
     "GGASS",      "General Government: Total Financial Assets",                             "F", "H", 1, "Q", 45, "Credit Aggregates",
     "GGASS.SLN",  "General Government - Assets: Short-Term Loans",                          "F", "H", 1, "Q", 45, "Credit Aggregates",
     "GGASS.LLN",  "General Government - Assets: Long-Term Loans",                           "F", "H", 1, "Q", 45, "Credit Aggregates",
     "GGLB",       "General Government: Total Financial Liabilities",                        "F", "H", 1, "Q", 45, "Credit Aggregates",
     "GGLB.SLN",   "General Government - Liabilities: Short-Term Loans",                     "F", "H", 1, "Q", 45, "Credit Aggregates",
     "GGLB.LLN",   "General Government - Liabilities: Long-Term Loans",                      "F", "H", 1, "Q", 45, "Credit Aggregates",
+    "HHASS",      "Households: Total Financial Assets",                              "F", "H", 1, "Q", 45, "Credit Aggregates",
+    "HHASS.SLN",  "Households - Assets: Short-Term Loans",                            "F", "H", 1, "Q", 45, "Credit Aggregates","HHASS.LLN",  "Households - Assets: Long-Term Loans",                             "F", "H", 1, "Q", 45, "Credit Aggregates",
     "HHLB",       "Households: Total Financial Liabilities",                                "F", "H", 1, "Q", 45, "Credit Aggregates",
     "HHLB.SLN",   "Households - Liabilities: Short-Term Loans",                             "F", "H", 1, "Q", 45, "Credit Aggregates",
     "HHLB.LLN",   "Households - Liabilities: Long-Term Loans",                              "F", "H", 1, "Q", 45, "Credit Aggregates",
-    
+
     # Labor Costs
-    "ULCCON",     "Nominal Unit Labor Costs: Construction",                                 "N", "H", 1, "Q", 45, "Labor Costs",
     "ULCIN",      "Nominal Unit Labor Costs: Industry",                                     "N", "H", 1, "Q", 45, "Labor Costs",
+    "ULCMQ",      "Nominal Unit Labor Costs: Mining and Quarrying",                  "N", "H", 1, "Q", 45, "Labor Costs",
     "ULCMN",      "Nominal Unit Labor Costs: Manufacturing",                                "N", "H", 1, "Q", 45, "Labor Costs",
+    "ULCCON",     "Nominal Unit Labor Costs: Construction",                                 "N", "H", 1, "Q", 45, "Labor Costs",
+    "ULCRT",      "Nominal Unit Labor Costs: Wholesale/Retail Trade, Transport, Food, IT",  "N", "H", 1, "Q", 45, "Labor Costs",
     "ULCFC",      "Nominal Unit Labor Costs: Financial Activities",                         "N", "H", 1, "Q", 45, "Labor Costs",
     "ULCRE",      "Nominal Unit Labor Costs: Real Estate",                                  "N", "H", 1, "Q", 45, "Labor Costs",
     "ULCPR",      "Nominal Unit Labor Costs: Professional, Scientific, Technical activities","N", "H", 1, "Q", 45, "Labor Costs",
-    "ULCRT",      "Nominal Unit Labor Costs: Wholesale/Retail Trade, Transport, Food, IT",  "N", "H", 1, "Q", 45, "Labor Costs",
     
     # Financial Markets
     "REER42",     "Real Exchange Rate (42 main industrial countries)",                      "F", "H", 1, "M", 35, "Financial Markets",
@@ -1677,21 +2443,46 @@ to_setcell <- function(x) {
   )
 }
 
-build_latex_selection_table <- function(sel_small,
-                                        sel_medium,
-                                        sel_large,
-                                        metadata = build_metadata_table(),
-                                        country_cols = country_order,
-                                        caption = "Macroeconomic predictors: country-specific selection across information-set sizes",
-                                        label = "tab:variables_selected_country_size") {
+# ==============================================================================
+# LATEX TABLE: COUNTRY-SPECIFIC PREDICTOR SELECTION
+# ==============================================================================
+
+build_latex_selection_table <- function(
+    sel_small,
+    sel_medium,
+    sel_large,
+    metadata = build_metadata_table(),
+    country_cols = country_order,
+    caption = "Country-specific predictor selection",
+    label = "tab:variables_selected_country_size",
+    note = NULL
+) {
+  
+  if (is.null(note)) {
+    note <- paste0(
+      "\\textit{Notes:} Country entries report the information sets in which ",
+      "the predictor is selected: \\textbf{S} = small, \\textbf{M} = medium, ",
+      "and \\textbf{L} = large. Combined labels indicate selection in more ",
+      "than one information set for the corresponding country. ",
+      "\\textbf{Cl.} denotes variable class: $R$ = real activity, ",
+      "$N$ = nominal, $C$ = confidence, and $F$ = financial. ",
+      "\\textbf{Cat.} distinguishes hard ($H$) from soft ($S$) indicators. ",
+      "\\textbf{Tr.} reports the transformation code, \\textbf{Fr.} the ",
+      "sampling frequency, and \\textbf{Del.} the approximate release delay ",
+      "in days. GDP is excluded from the table."
+    )
+  }
   
   sel_all <- build_selection_size_table(
     sel_small    = sel_small,
     sel_medium   = sel_medium,
     sel_large    = sel_large,
     country_cols = country_cols
-  ) %>%
-    dplyr::rename(ID = base_name, Fr = frequency) %>%
+  ) |>
+    dplyr::rename(
+      ID = base_name,
+      Fr = frequency
+    ) |>
     dplyr::filter(ID != "GDP")
   
   missing_in_meta <- setdiff(sel_all$ID, metadata$ID)
@@ -1715,20 +2506,28 @@ build_latex_selection_table <- function(sel_small,
     "Confidence Indicators"
   )
   
-  tab <- metadata %>%
-    dplyr::filter(ID != "GDP") %>%
-    dplyr::inner_join(sel_all, by = c("ID", "Fr")) %>%
+  tab <- metadata |>
+    dplyr::filter(ID != "GDP") |>
+    dplyr::inner_join(
+      sel_all,
+      by = c("ID", "Fr")
+    ) |>
     dplyr::mutate(
-      dplyr::across(dplyr::all_of(country_cols), to_setcell),
+      dplyr::across(
+        dplyr::all_of(country_cols),
+        to_setcell
+      ),
       ID     = escape_latex(ID),
       Series = escape_latex(Series),
       Cl     = escape_latex(Cl),
       Cat    = escape_latex(Cat),
       Fr     = escape_latex(Fr),
       Group  = factor(Group, levels = groups_order)
-    ) %>%
-    dplyr::arrange(Group, Fr, ID) %>%
-    dplyr::mutate(N = dplyr::row_number())
+    ) |>
+    dplyr::arrange(Group, Fr, ID) |>
+    dplyr::mutate(
+      N = dplyr::row_number()
+    )
   
   header <- paste0(
     "\\begin{table}[p]\n",
@@ -1736,25 +2535,28 @@ build_latex_selection_table <- function(sel_small,
     "\\tiny\n",
     "\\renewcommand{\\arraystretch}{0.82}\n",
     "\\setlength{\\tabcolsep}{1.6pt}\n",
-    "\\newcommand{\\setcell}[1]{{\\fontsize{4.1}{4.4}\\selectfont #1}}\n\n",
+    "\\providecommand{\\setcell}[1]{{\\fontsize{4.1}{4.4}\\selectfont #1}}\n\n",
     "\\caption{", escape_latex(caption), "}\n",
     "\\label{", label, "}\n\n",
     "\\resizebox{\\textwidth}{!}{%\n",
     "{\\fontsize{4.0}{4.4}\\selectfont\n",
     "\\begin{tabular}{c p{1.25cm} p{5.6cm} c c c c c c c c c c c c c}\n",
     "\\toprule\n",
-    "\\textbf{N} & \\textbf{ID} & \\textbf{Series} & \\textbf{Cl.} & \\textbf{Cat.} & \\textbf{Tr.} & \\textbf{Fr.} & \\textbf{Del.} & ",
+    "\\textbf{N} & \\textbf{ID} & \\textbf{Series} & ",
+    "\\textbf{Cl.} & \\textbf{Cat.} & \\textbf{Tr.} & ",
+    "\\textbf{Fr.} & \\textbf{Del.} & ",
     paste0("\\textbf{", country_cols, "}", collapse = " & "),
     " \\\\\n",
-    "\\midrule\n",
     "\\midrule\n"
   )
   
-  body_lines <- c()
-  ncols_total <- 8 + length(country_cols)
+  body_lines <- character(0)
+  ncols_total <- 8L + length(country_cols)
   
   for (grp in groups_order) {
-    subtab <- tab %>% dplyr::filter(Group == grp)
+    
+    subtab <- tab |>
+      dplyr::filter(Group == grp)
     
     if (nrow(subtab) == 0L) {
       next
@@ -1768,16 +2570,28 @@ build_latex_selection_table <- function(sel_small,
       "}} \\\\"
     )
     
-    rows <- subtab %>%
+    rows <- subtab |>
       dplyr::select(
-        N, ID, Series, Cl, Cat, Tr, Fr, Del,
+        N,
+        ID,
+        Series,
+        Cl,
+        Cat,
+        Tr,
+        Fr,
+        Del,
         dplyr::all_of(country_cols)
       )
     
     row_lines <- apply(
       rows,
       1,
-      function(r) paste0(paste(r, collapse = " & "), " \\\\")
+      function(r) {
+        paste0(
+          paste(r, collapse = " & "),
+          " \\\\"
+        )
+      }
     )
     
     body_lines <- c(
@@ -1799,18 +2613,744 @@ build_latex_selection_table <- function(sel_small,
     "}\n",
     "}\n",
     "\\parbox{0.98\\textwidth}{\\tiny\n",
-    "\\textit{Notes:} Country entries report the information sets in which the predictor is selected: ",
-    "\\textbf{S} = small, \\textbf{M} = medium, \\textbf{L} = large. ",
-    "Combined labels such as \\textbf{S/M}, \\textbf{S/L}, \\textbf{M/L}, and \\textbf{S/M/L} indicate that the predictor is selected in more than one information set for the corresponding country. ",
-    "\\textbf{Cl.} denotes the variable class, where $R$ indicates real activity variables, $N$ nominal variables, $C$ confidence indicators, and $F$ financial variables. ",
-    "\\textbf{Cat.} distinguishes hard ($H$) from soft ($S$) indicators. ",
-    "\\textbf{Tr.} reports the transformation code, \\textbf{Fr.} the sampling frequency, and \\textbf{Del.} the approximate release delay in days. ",
-    "The target variable GDP is excluded from the table.}\n",
+    note,
+    "}\n",
     "\\end{table}\n"
   )
   
-  paste0(header, paste(body_lines, collapse = "\n"), footer)
+  paste0(
+    header,
+    paste(body_lines, collapse = "\n"),
+    footer
+  )
 }
+
+
+# ==============================================================================
+# LATEX TABLE: PREDICTOR-SET COMPOSITION ACROSS DATED REGIMES
+# ==============================================================================
+build_latex_predictor_dimensions_table <- function(
+    tbl,
+    caption,
+    label,
+    evaluation_end = NULL,
+    note = paste0(
+      "\\textit{Notes:} Entries are counts of non-GDP predictors in the ",
+      "country-union information set. Within each information set, ",
+      "Total $N=N_m+N_q$ is the predictor-column dimension."
+    )
+) {
+  
+  required_cols <- c(
+    "regime",
+    "size",
+    "active_from",
+    "monthly_predictors",
+    "quarterly_predictors"
+  )
+  
+  missing_cols <- setdiff(required_cols, names(tbl))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Missing columns in predictor-dimension table: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  size_order <- c("small", "medium", "large")
+  
+  size_columns <- c(
+    "small_M",  "small_Q",  "small_N",
+    "medium_M", "medium_Q", "medium_N",
+    "large_M",  "large_Q",  "large_N"
+  )
+  
+  tbl_clean <- tbl |>
+    dplyr::mutate(
+      regime      = as.character(regime),
+      size        = tolower(as.character(size)),
+      active_from = as.Date(active_from)
+    ) |>
+    dplyr::distinct(
+      regime,
+      size,
+      active_from,
+      monthly_predictors,
+      quarterly_predictors
+    )
+  
+  tab <- tbl_clean |>
+    dplyr::select(
+      regime,
+      size,
+      monthly_predictors,
+      quarterly_predictors
+    ) |>
+    tidyr::pivot_longer(
+      cols      = c(monthly_predictors, quarterly_predictors),
+      names_to  = "frequency",
+      values_to = "n_predictors"
+    ) |>
+    dplyr::mutate(
+      frequency = dplyr::recode(
+        frequency,
+        monthly_predictors   = "M",
+        quarterly_predictors = "Q"
+      )
+    ) |>
+    tidyr::pivot_wider(
+      names_from  = c(size, frequency),
+      values_from = n_predictors,
+      names_glue  = "{size}_{frequency}"
+    )
+  
+  for (size_i in size_order) {
+    
+    col_M <- paste0(size_i, "_M")
+    col_Q <- paste0(size_i, "_Q")
+    col_N <- paste0(size_i, "_N")
+    
+    if (!col_M %in% names(tab)) {
+      tab[[col_M]] <- NA_integer_
+    }
+    
+    if (!col_Q %in% names(tab)) {
+      tab[[col_Q]] <- NA_integer_
+    }
+    
+    tab[[col_N]] <- as.integer(
+      tab[[col_M]] + tab[[col_Q]]
+    )
+  }
+  
+  latex_month_year <- function(x) {
+    
+    month_names <- c(
+      "Jan.", "Feb.", "Mar.", "Apr.",
+      "May", "Jun.", "Jul.", "Aug.",
+      "Sep.", "Oct.", "Nov.", "Dec."
+    )
+    
+    x <- as.Date(x)
+    
+    paste0(
+      month_names[as.integer(format(x, "%m"))],
+      "\\ ",
+      format(x, "%Y")
+    )
+  }
+  
+  regime_labels <- c(
+    "Pre-evaluation" = "Initial regime",
+    "Post-COVID"     = "Post-COVID update"
+  )
+  
+  if (!is.null(evaluation_end)) {
+    
+    regime_dates <- tbl_clean |>
+      dplyr::group_by(regime) |>
+      dplyr::summarise(
+        active_from = dplyr::first(active_from),
+        .groups = "drop"
+      )
+    
+    initial_start <- regime_dates |>
+      dplyr::filter(regime == "Pre-evaluation") |>
+      dplyr::pull(active_from)
+    
+    update_start <- regime_dates |>
+      dplyr::filter(regime == "Post-COVID") |>
+      dplyr::pull(active_from)
+    
+    if (length(initial_start) == 1L && length(update_start) == 1L) {
+      
+      initial_end <- seq.Date(
+        from       = update_start,
+        by         = "-1 month",
+        length.out = 2L
+      )[2L]
+      
+      regime_labels["Pre-evaluation"] <- paste0(
+        latex_month_year(initial_start),
+        "--",
+        latex_month_year(initial_end)
+      )
+      
+      regime_labels["Post-COVID"] <- paste0(
+        latex_month_year(update_start),
+        "--",
+        latex_month_year(as.Date(evaluation_end))
+      )
+    }
+  }
+  
+  tab <- tab |>
+    dplyr::mutate(
+      regime_order = match(
+        regime,
+        c("Pre-evaluation", "Post-COVID")
+      ),
+      Regime = unname(regime_labels[regime])
+    ) |>
+    dplyr::arrange(regime_order) |>
+    dplyr::mutate(
+      dplyr::across(
+        dplyr::all_of(size_columns),
+        ~ ifelse(
+          is.na(.x),
+          "--",
+          as.character(as.integer(.x))
+        )
+      )
+    )
+  
+  body <- vapply(
+    seq_len(nrow(tab)),
+    function(i) {
+      
+      row_prefix <- if (tab$regime[i] == "Post-COVID") {
+        "\\rowcolor{matrixgray}\n"
+      } else {
+        ""
+      }
+      
+      values_i <- c(
+        tab$Regime[i],
+        unlist(
+          tab[i, size_columns],
+          use.names = FALSE
+        )
+      )
+      
+      paste0(
+        row_prefix,
+        paste(values_i, collapse = " & "),
+        " \\\\"
+      )
+    },
+    character(1)
+  )
+  
+  paste0(
+    "\\begin{table}[!htbp]\n",
+    "\\centering\n",
+    "\\scriptsize\n",
+    "\\renewcommand{\\arraystretch}{1.3}\n",
+    "\\setlength{\\tabcolsep}{7.0pt}\n",
+    "\\definecolor{topgray}{gray}{0.92}\n",
+    "\\definecolor{hypergray}{gray}{0.91}\n",
+    "\\definecolor{matrixgray}{gray}{0.965}\n",
+    
+    "\\caption{", escape_latex(caption), "}\n",
+    "\\label{", label, "}\n\n",
+    
+    "\\begin{adjustbox}{max width=\\textwidth,center}\n",
+    "\\begin{tabular}{@{}c ccc ccc ccc@{}}\n",
+    "\\toprule\n",
+    
+    "\\rowcolor{hypergray}\n",
+    " & \\multicolumn{3}{c}{\\textbf{Small}} & ",
+    "\\multicolumn{3}{c}{\\textbf{Medium}} & ",
+    "\\multicolumn{3}{c}{\\textbf{Large}} \\\\\n",
+    
+    "\\cmidrule(lr){2-4}",
+    "\\cmidrule(lr){5-7}",
+    "\\cmidrule(lr){8-10}\n",
+    
+    "\\rowcolor{topgray}\n",
+    "\\textbf{Regime} & ",
+    "\\textbf{Monthly} & \\textbf{Quarterly} & \\textbf{Total $N$} & ",
+    "\\textbf{Monthly} & \\textbf{Quarterly} & \\textbf{Total $N$} & ",
+    "\\textbf{Monthly} & \\textbf{Quarterly} & \\textbf{Total $N$} \\\\\n",
+    
+    "\\midrule\n",
+    paste(body, collapse = "\n"),
+    
+    "\n\\bottomrule\n",
+    "\\end{tabular}\n",
+    "\\end{adjustbox}\n",
+    
+    "\\vspace{-0.3cm}\n",
+    "\\begin{center}\n",
+    "\\parbox{0.88\\textwidth}{\\centering\\scriptsize\n",
+    note,
+    "}\n",
+    "\\end{center}\n",
+    "\\end{table}\n"
+  )
+}
+
+# ==============================================================================
+# LATEX TABLE: COUNTRY-SPECIFIC SELECTION TURNOVER
+# ==============================================================================
+
+build_latex_selection_turnover_table <- function(
+    tbl,
+    caption,
+    label,
+    note = paste0(
+      "\\textit{Notes:} Entries are country--predictor pairs. Retained pairs ",
+      "are selected in both regimes; added and removed pairs are selected ",
+      "only after and only before the update, respectively. Overlap is ",
+      "computed relative to the union of pairs selected across regimes."
+    )
+) {
+  
+  required_cols <- c(
+    "size",
+    "frequency",
+    "pre_selected",
+    "retained",
+    "added",
+    "dropped",
+    "post_selected",
+    "jaccard"
+  )
+  
+  missing_cols <- setdiff(required_cols, names(tbl))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Missing columns in selection-turnover table: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  tab <- tbl |>
+    dplyr::mutate(
+      size      = tolower(as.character(size)),
+      frequency = toupper(as.character(frequency))
+    )
+  
+  format_int <- function(x) {
+    
+    if (length(x) == 0L || is.na(x)) {
+      return("--")
+    }
+    
+    as.character(as.integer(round(x)))
+  }
+  
+  format_pct <- function(x) {
+    
+    if (length(x) == 0L || is.na(x)) {
+      return("--")
+    }
+    
+    sprintf("%.1f", 100 * x)
+  }
+  
+  build_row <- function(size_i, frequency_i, label_i) {
+    
+    row_i <- tab |>
+      dplyr::filter(
+        size == size_i,
+        frequency == frequency_i
+      )
+    
+    if (nrow(row_i) == 0L) {
+      return(
+        paste(
+          c(label_i, rep("--", 6L)),
+          collapse = " & "
+        )
+      )
+    }
+    
+    if (nrow(row_i) > 1L) {
+      stop(
+        "More than one turnover row for size = ",
+        size_i,
+        " and frequency = ",
+        frequency_i,
+        "."
+      )
+    }
+    
+    paste(
+      c(
+        label_i,
+        format_int(row_i$pre_selected),
+        format_int(row_i$retained),
+        format_int(row_i$added),
+        format_int(row_i$dropped),
+        format_int(row_i$post_selected),
+        format_pct(row_i$jaccard)
+      ),
+      collapse = " & "
+    )
+  }
+  
+  size_labels <- c(
+    small  = "Small set",
+    medium = "Medium set",
+    large  = "Large set"
+  )
+  
+  blocks <- unlist(
+    lapply(
+      c("small", "medium", "large"),
+      function(size_i) {
+        
+        prefix_i <- if (size_i == "small") {
+          character(0)
+        } else {
+          "\\addlinespace[0.12em]"
+        }
+        
+        c(
+          prefix_i,
+          "\\rowcolor{hypergray}",
+          paste0(
+            "\\multicolumn{7}{c}{\\textbf{",
+            size_labels[size_i],
+            "}} \\\\"
+          ),
+          "\\cmidrule(lr){1-7}",
+          paste0(build_row(size_i, "M", "Monthly"), " \\\\"),
+          paste0(build_row(size_i, "Q", "Quarterly"), " \\\\")
+        )
+      }
+    )
+  )
+  
+  paste0(
+    "\\begin{table}[!htbp]\n",
+    "\\centering\n",
+    "\\scriptsize\n",
+    "\\renewcommand{\\arraystretch}{0.90}\n",
+    "\\setlength{\\tabcolsep}{2.0pt}\n",
+    "\\caption{", escape_latex(caption), "}\n",
+    "\\label{", label, "}\n\n",
+    "\\begin{tabular}{@{}c c c c c c c@{}}\n",
+    "\\toprule\n",
+    "\\rowcolor{topgray}\n",
+    "\\textbf{Frequency} & ",
+    "\\textbf{Initial} & ",
+    "\\textbf{Retained} & ",
+    "\\textbf{Added} & ",
+    "\\textbf{Removed} & ",
+    "\\textbf{Updated} & ",
+    "\\textbf{Overlap (\\%)} \\\\\n",
+    "\\midrule\n\n",
+    paste(blocks, collapse = "\n"),
+    "\n\n\\bottomrule\n",
+    "\\end{tabular}\n",
+    "\\vspace{-0.3cm}\n",
+    "\\begin{center}\n",
+    "\\parbox{0.88\\textwidth}{\\centering\\scriptsize\n",
+    note,
+    "}\n",
+    "\\end{center}\n",
+    "\\end{table}\n"
+  )
+}
+# ==============================================================================
+# LATEX COMPACT TABLE: COUNTRY-SPECIFIC SELECTION CHANGES
+# =============================================================================
+
+build_latex_selection_changes_by_status_table <- function(
+    selection_transition,
+    caption,
+    label,
+    country_order = NULL
+) {
+  
+  required_cols <- c(
+    "country",
+    "base_name",
+    "frequency",
+    "size",
+    "status"
+  )
+  
+  missing_cols <- setdiff(required_cols, names(selection_transition))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Missing columns in selection-transition table: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  size_levels <- c("small", "medium", "large")
+  
+  change_columns <- c(
+    "small_added",
+    "small_removed",
+    "medium_added",
+    "medium_removed",
+    "large_added",
+    "large_removed"
+  )
+  
+  order_countries <- function(x) {
+    
+    x <- unique(as.character(x))
+    x <- x[!is.na(x) & nzchar(x)]
+    
+    if (length(x) == 0L) {
+      return(character(0))
+    }
+    
+    if (is.null(country_order)) {
+      return(sort(x))
+    }
+    
+    country_rank <- match(x, country_order)
+    
+    x[
+      order(
+        is.na(country_rank),
+        ifelse(is.na(country_rank), Inf, country_rank),
+        x
+      )
+    ]
+  }
+  
+  collapse_countries <- function(x) {
+    
+    x <- order_countries(x)
+    
+    if (length(x) == 0L) {
+      return("--")
+    }
+    
+    paste(x, collapse = ", ")
+  }
+  
+  changes <- selection_transition |>
+    dplyr::transmute(
+      country = as.character(country),
+      
+      base_name = dplyr::recode(
+        as.character(base_name),
+        "TASS.LBD" = "TASS.LDB",
+        "TLB.LBD"  = "TLB.LDB",
+        .default   = as.character(base_name)
+      ),
+      
+      frequency = toupper(as.character(frequency)),
+      size      = tolower(as.character(size)),
+      status_raw = tolower(as.character(status))
+    ) |>
+    dplyr::mutate(
+      status = dplyr::case_when(
+        status_raw == "added" ~ "Added",
+        status_raw %in% c("dropped", "removed") ~ "Removed",
+        TRUE ~ NA_character_
+      )
+    ) |>
+    dplyr::filter(
+      !is.na(status),
+      size %in% size_levels,
+      frequency %in% c("M", "Q")
+    ) |>
+    dplyr::select(-status_raw)
+  
+  if (nrow(changes) == 0L) {
+    return(
+      paste0(
+        "\\begin{table}[htbp]\n",
+        "\\centering\n",
+        "\\small\n",
+        "\\caption{", escape_latex(caption), "}\n",
+        "\\label{", label, "}\n",
+        "\\begin{tabular}{l}\n",
+        "\\toprule\n",
+        "No country-specific changes in predictor selection. \\\\\n",
+        "\\bottomrule\n",
+        "\\end{tabular}\n",
+        "\\end{table}\n"
+      )
+    )
+  }
+  
+  change_cells <- changes |>
+    dplyr::group_by(
+      base_name,
+      frequency,
+      size,
+      status
+    ) |>
+    dplyr::summarise(
+      countries = collapse_countries(country),
+      .groups   = "drop"
+    ) |>
+    dplyr::mutate(
+      direction = tolower(status)
+    ) |>
+    dplyr::select(-status) |>
+    tidyr::pivot_wider(
+      names_from  = c(size, direction),
+      values_from = countries,
+      names_glue  = "{size}_{direction}",
+      values_fill = list(countries = "--")
+    )
+  
+  for (column_i in change_columns) {
+    
+    if (!column_i %in% names(change_cells)) {
+      change_cells[[column_i]] <- "--"
+    }
+    
+    change_cells[[column_i]] <- as.character(change_cells[[column_i]])
+    
+    change_cells[[column_i]][
+      is.na(change_cells[[column_i]]) |
+        !nzchar(change_cells[[column_i]])
+    ] <- "--"
+  }
+  
+  tab <- change_cells |>
+    dplyr::mutate(
+      frequency_order = match(frequency, c("M", "Q")),
+      
+      Predictor = paste0(
+        "\\texttt{",
+        escape_latex(base_name),
+        "}"
+      )
+    ) |>
+    dplyr::arrange(
+      frequency_order,
+      base_name
+    ) |>
+    dplyr::select(
+      frequency,
+      Predictor,
+      dplyr::all_of(change_columns)
+    )
+  
+  build_frequency_panel <- function(
+    frequency_code,
+    panel_title
+  ) {
+    
+    panel <- tab |>
+      dplyr::filter(frequency == frequency_code) |>
+      dplyr::select(-frequency)
+    
+    if (nrow(panel) == 0L) {
+      return(character(0))
+    }
+    
+    rows <- vapply(
+      seq_len(nrow(panel)),
+      function(i) {
+        
+        row_colour <- if (i %% 2L == 1L) {
+          "\\rowcolor{selectionrowa}\n"
+        } else {
+          "\\rowcolor{selectionrowb}\n"
+        }
+        
+        row_i <- unlist(
+          panel[i, ],
+          use.names = FALSE
+        )
+        
+        paste0(
+          row_colour,
+          paste(row_i, collapse = " & "),
+          " \\\\"
+        )
+      },
+      character(1)
+    )
+    
+    separator <- c(
+      "\\addlinespace[0.15em]",
+      "\\specialrule{0.65pt}{0.20em}{0pt}",
+      "\\specialrule{0.25pt}{0.05em}{0.18em}"
+    )
+    
+    c(
+      separator,
+      "\\rowcolor{matrixgray}",
+      paste0(
+        "\\multicolumn{7}{c}{\\textbf{",
+        panel_title,
+        "}} \\\\[-0.15em]"
+      ),
+      "\\cmidrule(lr){1-7}",
+      rows
+    )
+  }
+  
+  column_header <- paste0(
+    "\\rowcolor{topgray}\n",
+    "\\multicolumn{1}{c}{\\textbf{Predictor}} & ",
+    "\\multicolumn{2}{c}{\\textbf{Small}} & ",
+    "\\multicolumn{2}{c}{\\textbf{Medium}} & ",
+    "\\multicolumn{2}{c}{\\textbf{Large}} \\\\\n",
+    "\\cmidrule(lr){2-3}",
+    "\\cmidrule(lr){4-5}",
+    "\\cmidrule(lr){6-7}\n",
+    "\\rowcolor{hypergray}\n",
+    " & \\textbf{Added} & \\textbf{Removed} & ",
+    "\\textbf{Added} & \\textbf{Removed} & ",
+    "\\textbf{Added} & \\textbf{Removed} \\\\\n"
+  )
+  
+  body <- paste(
+    c(
+      build_frequency_panel("M", "Monthly predictors"),
+      build_frequency_panel("Q", "Quarterly predictors")
+    ),
+    collapse = "\n"
+  )
+  
+  header <- paste0(
+    "\\begin{table}[p]\n",
+    "\\centering\n",
+    "\\caption{", escape_latex(caption), "}\n",
+    "\\label{", label, "}\n",
+    "\\vspace{0.08cm}\n",
+    "\\begingroup\n",
+    "\\fontsize{6.5}{7.1}\\selectfont\n",
+    "\\renewcommand{\\arraystretch}{0.86}\n",
+    "\\setlength{\\tabcolsep}{0.45pt}\n",
+    "\\begin{adjustbox}{",
+    "max width=\\textwidth,",
+    "max totalheight=0.85\\textheight,",
+    "center",
+    "}\n",
+    "\\begin{tabular}{@{}",
+    ">{\\centering\\arraybackslash}p{1.45cm}",
+    ">{\\centering\\arraybackslash}p{2.55cm}",
+    ">{\\centering\\arraybackslash}p{2.55cm}",
+    ">{\\centering\\arraybackslash}p{2.55cm}",
+    ">{\\centering\\arraybackslash}p{2.55cm}",
+    ">{\\centering\\arraybackslash}p{2.55cm}",
+    ">{\\centering\\arraybackslash}p{2.55cm}",
+    "@{}}\n",
+    "\\toprule\n",
+    column_header,
+    "\\midrule\n"
+  )
+  
+  footer <- paste0(
+    "\n\\bottomrule\n",
+    "\\end{tabular}\n",
+    "\\end{adjustbox}\n",
+    "\\par\\vspace{0.04cm}\\noindent",
+    "\\parbox{0.96\\textwidth}{\\scriptsize ",
+    "\\textit{Notes:} Added and removed countries are reported by information ",
+    "set; \\texttt{--} denotes no change.}\n",
+    "\\endgroup\n",
+    "\\end{table}\n"
+  )
+  
+  paste0(
+    header,
+    body,
+    footer
+  )
+}
+
+
 
 # ==============================================================================
 # 3. DIEBOLD-MARIANO TEST HELPERS
@@ -2308,6 +3848,8 @@ build_forecast_win_table <- function(df,
                                      group_vars = NULL,
                                      include_dfm = TRUE) {
   
+  has_dfm <- isTRUE(include_dfm) && "win_dfm" %in% names(df)
+  
   if (is.null(group_vars)) {
     
     out <- df %>%
@@ -2317,19 +3859,14 @@ build_forecast_win_table <- function(df,
         `VEC-P win share` = 100 * mean(win_vecp, na.rm = TRUE),
         `VEC-C wins`      = sum(win_vecc, na.rm = TRUE),
         `VEC-C win share` = 100 * mean(win_vecc, na.rm = TRUE),
-        `DFM wins`        = if (isTRUE(include_dfm) && "win_dfm" %in% names(.)) {
-          sum(win_dfm, na.rm = TRUE)
-        } else {
-          NA_real_
-        },
-        `DFM win share`   = if (isTRUE(include_dfm) && "win_dfm" %in% names(.)) {
-          100 * mean(win_dfm, na.rm = TRUE)
-        } else {
-          NA_real_
-        },
         .groups = "drop"
       ) %>%
       dplyr::mutate(Group = "Overall", .before = 1)
+    
+    if (has_dfm) {
+      out$`DFM wins`      <- sum(df$win_dfm, na.rm = TRUE)
+      out$`DFM win share` <- 100 * mean(df$win_dfm, na.rm = TRUE)
+    }
     
   } else {
     
@@ -2341,23 +3878,21 @@ build_forecast_win_table <- function(df,
         `VEC-P win share` = 100 * mean(win_vecp, na.rm = TRUE),
         `VEC-C wins`      = sum(win_vecc, na.rm = TRUE),
         `VEC-C win share` = 100 * mean(win_vecc, na.rm = TRUE),
-        `DFM wins`        = if (isTRUE(include_dfm) && "win_dfm" %in% names(.)) {
-          sum(win_dfm, na.rm = TRUE)
-        } else {
-          NA_real_
-        },
-        `DFM win share`   = if (isTRUE(include_dfm) && "win_dfm" %in% names(.)) {
-          100 * mean(win_dfm, na.rm = TRUE)
-        } else {
-          NA_real_
-        },
         .groups = "drop"
       )
-  }
-  
-  if (!isTRUE(include_dfm) || !"win_dfm" %in% names(df)) {
-    out <- out %>%
-      dplyr::select(-dplyr::any_of(c("DFM wins", "DFM win share")))
+    
+    if (has_dfm) {
+      dfm_part <- df %>%
+        dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
+        dplyr::summarise(
+          `DFM wins`      = sum(win_dfm, na.rm = TRUE),
+          `DFM win share` = 100 * mean(win_dfm, na.rm = TRUE),
+          .groups = "drop"
+        )
+      
+      out <- out %>%
+        dplyr::left_join(dfm_part, by = group_vars)
+    }
   }
   
   out %>%
@@ -4077,6 +5612,13 @@ theme_country_compare <- function(base_size = 14) {
     )
 }
 
+get_gdp_ylim <- function(df_gdp, pad_frac = 0.02, min_pad = 0.001) {
+  
+  rng <- range(df_gdp$GDP, na.rm = TRUE)
+  pad <- max(diff(rng) * pad_frac, min_pad)
+  
+  c(rng[1] - pad, rng[2] + pad)
+}
 # ==============================================================================
 # RMSFE-LEVEL WIN SUMMARY TABLES
 # ==============================================================================
@@ -4183,7 +5725,9 @@ build_forecast_win_table <- function(df,
                                      group_vars = NULL,
                                      include_dfm = TRUE) {
   
-  summarise_expr <- function(data) {
+  has_dfm <- isTRUE(include_dfm) && "win_dfm" %in% names(df)
+  
+  summarise_fun <- function(data) {
     out <- data %>%
       dplyr::summarise(
         Total             = dplyr::n(),
@@ -4194,11 +5738,17 @@ build_forecast_win_table <- function(df,
         .groups = "drop"
       )
     
-    if (isTRUE(include_dfm) && "win_dfm" %in% names(data)) {
-      out <- out %>%
-        dplyr::mutate(
-          `DFM wins`      = sum(data$win_dfm, na.rm = TRUE),
-          `DFM win share` = 100 * mean(data$win_dfm, na.rm = TRUE)
+    if (has_dfm) {
+      out <- data %>%
+        dplyr::summarise(
+          Total             = dplyr::n(),
+          `VEC-P wins`      = sum(win_vecp, na.rm = TRUE),
+          `VEC-P win share` = 100 * mean(win_vecp, na.rm = TRUE),
+          `VEC-C wins`      = sum(win_vecc, na.rm = TRUE),
+          `VEC-C win share` = 100 * mean(win_vecc, na.rm = TRUE),
+          `DFM wins`        = sum(win_dfm, na.rm = TRUE),
+          `DFM win share`   = 100 * mean(win_dfm, na.rm = TRUE),
+          .groups = "drop"
         )
     }
     
@@ -4206,12 +5756,15 @@ build_forecast_win_table <- function(df,
   }
   
   if (is.null(group_vars)) {
-    out <- summarise_expr(df) %>%
+    
+    out <- summarise_fun(df) %>%
       dplyr::mutate(Group = "Overall", .before = 1)
+    
   } else {
+    
     out <- df %>%
       dplyr::group_by(dplyr::across(dplyr::all_of(group_vars))) %>%
-      summarise_expr()
+      summarise_fun()
   }
   
   out %>%
@@ -5084,5 +6637,2962 @@ run_matrix_factor_diagnostics <- function(
     plot_col_loadings         = plot_col_loadings,
     file_static_factor_matrix = file_static_factor_matrix,
     file_col_loadings         = file_col_loadings
+  )
+}
+
+# ==============================================================================
+# GDP TARGET-PROXY AVAILABILITY TABLE FOR LATEX
+# ==============================================================================
+build_missing_matrix_table <- function(
+    selection_report,
+    var_scope = "union"
+) {
+  
+  size_order     <- c("small", "medium", "large")
+  vintage_levels <- c("M1", "M2", "M3")
+  
+  required_helpers <- c(
+    "build_tensor",
+    "make_regime_data",
+    "unbalancedness_tensor",
+    "compute_m_tr"
+  )
+  
+  missing_helpers <- required_helpers[
+    !vapply(
+      required_helpers,
+      exists,
+      logical(1),
+      mode = "function"
+    )
+  ]
+  
+  if (length(missing_helpers) > 0L) {
+    stop(
+      "Missing required functions: ",
+      paste(missing_helpers, collapse = ", "),
+      ". Make sure matrix.mf.tprf.now.R is sourced."
+    )
+  }
+  
+  params_ref <- selection_report$fit_results$small$params
+  
+  required_params <- c(
+    "start_eval",
+    "end_eval"
+  )
+  
+  missing_params <- setdiff(required_params, names(params_ref))
+  
+  if (length(missing_params) > 0L) {
+    stop(
+      "Missing parameters: ",
+      paste(missing_params, collapse = ", ")
+    )
+  }
+  
+  if (is.null(selection_report$fit_results$small$dates_q)) {
+    stop(
+      "Missing dates_q in selection_report$fit_results$small."
+    )
+  }
+  
+  if (is.null(selection_report$dates$updated_regime_start)) {
+    stop(
+      "Missing updated_regime_start in selection_report$dates."
+    )
+  }
+  
+  dates_q <- as.Date(
+    selection_report$fit_results$small$dates_q
+  )
+  
+  evaluation_start <- as.Date(params_ref$start_eval)
+  evaluation_end   <- as.Date(params_ref$end_eval)
+  
+  post_start <- as.Date(
+    selection_report$dates$updated_regime_start
+  )
+  
+  build_regime_data <- function(
+    regime_obj,
+    regime_label,
+    size_label
+  ) {
+    
+    params_i <- selection_report$fit_results[[size_label]]$params
+    
+    tensor_i <- build_tensor(
+      prep      = regime_obj[[size_label]]$all_countries,
+      params    = params_i,
+      var_scope = var_scope
+    )
+    
+    selection_end_i <- as.Date(
+      regime_obj[[size_label]]$dimensions$selection_end[1L]
+    )
+    
+    regime_data_i <- make_regime_data(
+      tensor_obj    = tensor_i,
+      label         = regime_label,
+      selection_end = selection_end_i,
+      params        = params_i
+    )
+    
+    list(
+      data    = regime_data_i,
+      dates_m = as.Date(tensor_i$dates)
+    )
+  }
+  
+  get_block_stats <- function(
+    X_cut,
+    variable_index
+  ) {
+    
+    X_block <- X_cut[, , variable_index, drop = FALSE]
+    
+    missing_cells <- sum(is.na(X_block))
+    total_cells   <- length(X_block)
+    
+    c(
+      missing_cells = missing_cells,
+      total_cells   = total_cells,
+      missing_share = 100 * missing_cells / total_cells
+    )
+  }
+  
+  build_regime_vintages <- function(
+    regime_obj,
+    regime_label,
+    size_label,
+    window_start,
+    window_end
+  ) {
+    
+    obj_i <- build_regime_data(
+      regime_obj   = regime_obj,
+      regime_label = regime_label,
+      size_label   = size_label
+    )
+    
+    regime_data_i <- obj_i$data
+    dates_m_i     <- obj_i$dates_m
+    
+    if (length(dates_m_i) != dim(regime_data_i$X_full)[1L]) {
+      stop(
+        "Incompatible dates_m and X_full dimensions for ",
+        regime_label,
+        ", ",
+        size_label,
+        "."
+      )
+    }
+    
+    vintage_index <- which(
+      dates_m_i >= window_start &
+        dates_m_i <= window_end
+    )
+    
+    if (length(vintage_index) == 0L) {
+      stop(
+        "No evaluation vintages found for ",
+        regime_label,
+        ", ",
+        size_label,
+        "."
+      )
+    }
+    
+    month_position <- vapply(
+      vintage_index,
+      function(tt) {
+        compute_m_tr(
+          date_t  = dates_m_i[tt],
+          dates_q = dates_q
+        )
+      },
+      integer(1)
+    )
+    
+    valid_vintage <- !is.na(month_position)
+    
+    vintage_index  <- vintage_index[valid_vintage]
+    month_position <- month_position[valid_vintage]
+    
+    if (length(vintage_index) == 0L) {
+      stop(
+        "No valid M1/M2/M3 vintages found for ",
+        regime_label,
+        ", ",
+        size_label,
+        "."
+      )
+    }
+    
+    idx_M <- seq_len(regime_data_i$N_m)
+    
+    idx_Q <- seq.int(
+      from = regime_data_i$N_m + 1L,
+      to   = regime_data_i$N_m + regime_data_i$N_q
+    )
+    
+    vintage_stats <- lapply(
+      seq_along(vintage_index),
+      function(i) {
+        
+        tt_i <- vintage_index[i]
+        
+        X_cut_i <- unbalancedness_tensor(
+          X_full    = regime_data_i$X_full,
+          Unb       = regime_data_i$Unb,
+          current_t = tt_i
+        )
+        
+        stats_M <- get_block_stats(
+          X_cut          = X_cut_i,
+          variable_index = idx_M
+        )
+        
+        stats_Q <- get_block_stats(
+          X_cut          = X_cut_i,
+          variable_index = idx_Q
+        )
+        
+        tibble::tibble(
+          regime       = regime_label,
+          size         = size_label,
+          vintage      = paste0("M", month_position[i]),
+          window_start = as.Date(window_start),
+          window_end   = as.Date(window_end),
+          
+          frequency = c("Monthly", "Quarterly"),
+          
+          missing_cells = c(
+            stats_M["missing_cells"],
+            stats_Q["missing_cells"]
+          ),
+          
+          total_cells = c(
+            stats_M["total_cells"],
+            stats_Q["total_cells"]
+          ),
+          
+          missing_share = c(
+            stats_M["missing_share"],
+            stats_Q["missing_share"]
+          )
+        )
+      }
+    )
+    
+    dplyr::bind_rows(vintage_stats)
+  }
+  
+  initial_end <- post_start %m-% lubridate::period(1, "month")
+  
+  stats_long <- dplyr::bind_rows(
+    lapply(
+      size_order,
+      function(size_i) {
+        build_regime_vintages(
+          regime_obj   = selection_report$initial,
+          regime_label = "Initial regime",
+          size_label   = size_i,
+          window_start = evaluation_start,
+          window_end   = initial_end
+        )
+      }
+    ),
+    
+    lapply(
+      size_order,
+      function(size_i) {
+        build_regime_vintages(
+          regime_obj   = selection_report$updated,
+          regime_label = "Post-COVID update",
+          size_label   = size_i,
+          window_start = post_start,
+          window_end   = evaluation_end
+        )
+      }
+    )
+  )
+  
+  frequency_tab <- stats_long %>%
+    dplyr::group_by(
+      regime,
+      size,
+      frequency,
+      window_start,
+      window_end,
+      vintage
+    ) %>%
+    dplyr::summarise(
+      mean_missing_share = mean(missing_share),
+      n_vintages         = dplyr::n(),
+      .groups            = "drop"
+    ) %>%
+    dplyr::mutate(
+      frequency = tolower(as.character(frequency)),
+      vintage   = factor(as.character(vintage), levels = vintage_levels)
+    ) %>%
+    tidyr::pivot_wider(
+      id_cols = c(
+        regime,
+        size,
+        window_start,
+        window_end
+      ),
+      names_from  = c(frequency, vintage),
+      values_from = c(
+        mean_missing_share,
+        n_vintages
+      ),
+      names_glue = "{frequency}_{vintage}_{.value}"
+    )
+  
+  overall_tab <- stats_long %>%
+    dplyr::group_by(
+      regime,
+      size,
+      window_start,
+      window_end,
+      vintage
+    ) %>%
+    dplyr::summarise(
+      overall_share_vintage = 100 *
+        sum(missing_cells) /
+        sum(total_cells),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(
+      regime,
+      size,
+      window_start,
+      window_end
+    ) %>%
+    dplyr::summarise(
+      overall_share = mean(overall_share_vintage),
+      n_realtime_vintages = dplyr::n(),
+      .groups = "drop"
+    )
+  
+  tab <- frequency_tab %>%
+    dplyr::left_join(
+      overall_tab,
+      by = c(
+        "regime",
+        "size",
+        "window_start",
+        "window_end"
+      )
+    )
+  
+  required_share_cols <- c(
+    "monthly_M1_mean_missing_share",
+    "monthly_M2_mean_missing_share",
+    "monthly_M3_mean_missing_share",
+    "quarterly_M1_mean_missing_share",
+    "quarterly_M2_mean_missing_share",
+    "quarterly_M3_mean_missing_share"
+  )
+  
+  for (column_i in required_share_cols) {
+    if (!column_i %in% names(tab)) {
+      tab[[column_i]] <- NA_real_
+    }
+  }
+  
+  tab %>%
+    dplyr::transmute(
+      regime,
+      size,
+      window_start,
+      window_end,
+      
+      monthly_M1 = monthly_M1_mean_missing_share,
+      monthly_M2 = monthly_M2_mean_missing_share,
+      monthly_M3 = monthly_M3_mean_missing_share,
+      
+      quarterly_M1 = quarterly_M1_mean_missing_share,
+      quarterly_M2 = quarterly_M2_mean_missing_share,
+      quarterly_M3 = quarterly_M3_mean_missing_share,
+      
+      overall_share,
+      n_realtime_vintages = as.integer(n_realtime_vintages)
+    ) %>%
+    dplyr::mutate(
+      regime = factor(
+        regime,
+        levels = c(
+          "Initial regime",
+          "Post-COVID update"
+        )
+      ),
+      
+      size = factor(
+        size,
+        levels = size_order
+      )
+    ) %>%
+    dplyr::arrange(regime, size)
+}
+
+build_latex_missing_matrix_table <- function(
+    tbl,
+    selection_report,
+    caption,
+    label,
+    note = paste0(
+      "\\textit{Notes:} Monthly and quarterly entries report average unavailable ",
+      "shares (\\%) in the pseudo-real-time predictor tensors before imputation, ",
+      "separately for M1, M2, and M3 vintages. The final column reports the ",
+      "mean unavailable share across all real-time M1--M3 datasets in the ",
+      "corresponding update regime and information set. Within each vintage, ",
+      "this overall share is computed over all predictor cells. Quarterly ",
+      "predictors are represented on the monthly grid and include structural ",
+      "within-quarter unavailability."
+    )
+) {
+  
+  required_cols <- c(
+    "regime",
+    "size",
+    "monthly_M1",
+    "monthly_M2",
+    "monthly_M3",
+    "quarterly_M1",
+    "quarterly_M2",
+    "quarterly_M3",
+    "overall_share"
+  )
+  
+  missing_cols <- setdiff(required_cols, names(tbl))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Missing columns in real-time availability table: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  pre_start <- as.Date(
+    selection_report$dates$initial_regime_start
+  )
+  
+  post_start <- as.Date(
+    selection_report$dates$updated_regime_start
+  )
+  
+  evaluation_end <- as.Date(
+    selection_report$fit_results$small$params$end_eval
+  )
+  
+  pre_end <- post_start %m-% lubridate::period(1, "month")
+  
+  latex_month_year <- function(x) {
+    
+    month_names <- c(
+      "Jan.", "Feb.", "Mar.", "Apr.",
+      "May", "Jun.", "Jul.", "Aug.",
+      "Sep.", "Oct.", "Nov.", "Dec."
+    )
+    
+    x <- as.Date(x)
+    
+    paste0(
+      month_names[as.integer(format(x, "%m"))],
+      "\\ ",
+      format(x, "%Y")
+    )
+  }
+  
+  regime_labels <- c(
+    pre = paste0(
+      "\\textbf{Pre-update:} ",
+      latex_month_year(pre_start),
+      "--",
+      latex_month_year(pre_end)
+    ),
+    
+    post = paste0(
+      "\\textbf{Post-update:} ",
+      latex_month_year(post_start),
+      "--",
+      latex_month_year(evaluation_end)
+    )
+  )
+  
+  tab <- tbl %>%
+    dplyr::mutate(
+      regime_id = dplyr::case_when(
+        as.character(regime) == "Initial regime" ~ "pre",
+        as.character(regime) == "Post-COVID update" ~ "post",
+        TRUE ~ NA_character_
+      ),
+      
+      size = factor(
+        tolower(as.character(size)),
+        levels = c("small", "medium", "large")
+      )
+    )
+  
+  if (anyNA(tab$regime_id)) {
+    stop("Unknown regime label in tbl$regime.")
+  }
+  
+  if (anyDuplicated(tab[c("regime_id", "size")]) > 0L) {
+    stop(
+      "More than one row found for at least one regime ",
+      "and information-set combination."
+    )
+  }
+  
+  fmt_share <- function(x) {
+    
+    if (is.na(x)) {
+      return("--")
+    }
+    
+    sprintf("%.1f", as.numeric(x))
+  }
+  
+  make_regime_block <- function(
+    regime_key,
+    regime_label
+  ) {
+    
+    block <- tab %>%
+      dplyr::filter(.data$regime_id == regime_key) %>%
+      dplyr::arrange(size)
+    
+    if (nrow(block) != 3L) {
+      stop(
+        "Expected Small, Medium, and Large rows for ",
+        regime_key,
+        "."
+      )
+    }
+    
+    rows <- vapply(
+      seq_len(nrow(block)),
+      function(i) {
+        
+        paste0(
+          tools::toTitleCase(as.character(block$size[i])), " & ",
+          fmt_share(block$monthly_M1[i]), " & ",
+          fmt_share(block$monthly_M2[i]), " & ",
+          fmt_share(block$monthly_M3[i]), " & ",
+          fmt_share(block$quarterly_M1[i]), " & ",
+          fmt_share(block$quarterly_M2[i]), " & ",
+          fmt_share(block$quarterly_M3[i]), " & ",
+          fmt_share(block$overall_share[i]),
+          " \\\\"
+        )
+      },
+      character(1)
+    )
+    
+    c(
+      paste0(
+        "\\rowcolor{regimegray}\n",
+        "\\multicolumn{8}{@{}c@{}}{",
+        regime_label,
+        "} \\\\[-0.18em]"
+      ),
+      "\\cmidrule(lr){1-8}",
+      rows
+    )
+  }
+  
+  body <- c(
+    make_regime_block(
+      regime_key   = "pre",
+      regime_label = regime_labels["pre"]
+    ),
+    
+    "\\addlinespace[0.28em]",
+    
+    make_regime_block(
+      regime_key   = "post",
+      regime_label = regime_labels["post"]
+    )
+  )
+  
+  paste0(
+    "\\begin{table}[!htbp]\n",
+    "\\centering\n",
+    "\\scriptsize\n",
+    "\\renewcommand{\\arraystretch}{1.06}\n",
+    "\\setlength{\\tabcolsep}{2.8pt}\n",
+    "\\definecolor{topgray}{gray}{0.92}\n",
+    "\\definecolor{regimegray}{gray}{0.94}\n\n",
+    
+    "\\caption{", escape_latex(caption), "}\n",
+    "\\label{", label, "}\n\n",
+    
+    "\\begin{tabularx}{\\textwidth}{@{}",
+    ">{\\centering\\arraybackslash}p{2.20cm}",
+    "@{\\hspace{0.25cm}}",
+    "*{3}{>{\\centering\\arraybackslash}X}",
+    "@{\\hspace{0.55cm}}",
+    "*{3}{>{\\centering\\arraybackslash}X}",
+    "@{\\hspace{0.55cm}}",
+    ">{\\centering\\arraybackslash}X",
+    "@{}}\n",
+    
+    "\\toprule\n",
+    
+    " & \\multicolumn{3}{c}{\\textbf{Monthly predictors}} & ",
+    "\\multicolumn{3}{c}{\\textbf{Quarterly predictors}} & ",
+    "\\textbf{All predictors} \\\\\n",
+    
+    "\\cmidrule(lr){2-4}",
+    "\\cmidrule(lr){5-7}",
+    "\\cmidrule(lr){8-8}\n",
+    
+    "\\cellcolor{topgray}\\textbf{Information set} & ",
+    "\\cellcolor{topgray}\\textbf{M1} & ",
+    "\\cellcolor{topgray}\\textbf{M2} & ",
+    "\\cellcolor{topgray}\\textbf{M3} & ",
+    "\\cellcolor{topgray}\\textbf{M1} & ",
+    "\\cellcolor{topgray}\\textbf{M2} & ",
+    "\\cellcolor{topgray}\\textbf{M3} & ",
+    "\\cellcolor{topgray}\\textbf{Average} \\\\\n",
+    
+    "\\midrule\n",
+    paste(body, collapse = "\n"),
+    
+    "\n\\bottomrule\n",
+    "\\end{tabularx}\n",
+    
+    "\\vspace{-0.08cm}\n",
+    "\\noindent\\parbox{\\textwidth}{\\centering\\scriptsize\n",
+    note,
+    "}\n",
+    
+    "\\end{table}\n"
+  )
+}
+# ==============================================================================
+# CALIBRATION-VINTAGE PREDICTOR AVAILABILITY TABLE
+# ==============================================================================
+
+build_calibration_missing_matrix_table <- function(
+    selection_report,
+    var_scope = "union"
+) {
+  
+  size_order <- c("small", "medium", "large")
+  
+  required_helpers <- c(
+    "build_tensor",
+    "make_regime_data",
+    "unbalancedness_tensor"
+  )
+  
+  missing_helpers <- required_helpers[
+    !vapply(
+      required_helpers,
+      exists,
+      logical(1),
+      mode = "function"
+    )
+  ]
+  
+  if (length(missing_helpers) > 0L) {
+    stop(
+      "Missing required functions: ",
+      paste(missing_helpers, collapse = ", "),
+      "."
+    )
+  }
+  
+  get_missing_stats <- function(X_block) {
+    
+    n_missing <- sum(is.na(X_block))
+    n_total   <- length(X_block)
+    
+    c(
+      missing = n_missing,
+      total   = n_total,
+      share   = 100 * n_missing / n_total
+    )
+  }
+  
+  build_one <- function(
+    regime_obj,
+    regime_label,
+    size_label
+  ) {
+    
+    params_i <- selection_report$fit_results[[size_label]]$params
+    
+    tensor_i <- build_tensor(
+      prep      = regime_obj[[size_label]]$all_countries,
+      params    = params_i,
+      var_scope = var_scope
+    )
+    
+    selection_end_i <- as.Date(
+      regime_obj[[size_label]]$dimensions$selection_end[1L]
+    )
+    
+    regime_data_i <- make_regime_data(
+      tensor_obj    = tensor_i,
+      label         = regime_label,
+      selection_end = selection_end_i,
+      params        = params_i
+    )
+    
+    dates_m_i <- as.Date(
+      dimnames(regime_data_i$X_full)[[1]]
+    )
+    
+    if (anyNA(dates_m_i)) {
+      stop(
+        "Could not recover monthly dates for ",
+        regime_label,
+        ", ",
+        size_label,
+        "."
+      )
+    }
+    
+    calibration_t <- which(
+      format(dates_m_i, "%Y-%m") ==
+        format(selection_end_i, "%Y-%m")
+    )
+    
+    if (length(calibration_t) != 1L) {
+      stop(
+        "Could not identify a unique calibration vintage for ",
+        regime_label,
+        ", ",
+        size_label,
+        ". Expected month: ",
+        format(selection_end_i, "%Y-%m"),
+        "."
+      )
+    }
+    
+    X_cut_i <- unbalancedness_tensor(
+      X_full    = regime_data_i$X_full,
+      Unb       = regime_data_i$Unb,
+      current_t = calibration_t
+    )
+    
+    idx_M <- seq_len(regime_data_i$N_m)
+    
+    idx_Q <- seq.int(
+      from = regime_data_i$N_m + 1L,
+      to   = regime_data_i$N_m + regime_data_i$N_q
+    )
+    
+    stats_M <- get_missing_stats(
+      X_cut_i[, , idx_M, drop = FALSE]
+    )
+    
+    stats_Q <- get_missing_stats(
+      X_cut_i[, , idx_Q, drop = FALSE]
+    )
+    
+    stats_all <- get_missing_stats(X_cut_i)
+    
+    tibble::tibble(
+      regime = regime_label,
+      size   = size_label,
+      
+      calibration_date = dates_m_i[calibration_t],
+      history_start    = dates_m_i[1L],
+      history_months   = dim(X_cut_i)[1L],
+      
+      n_countries = dim(X_cut_i)[2L],
+      N_m         = regime_data_i$N_m,
+      N_q         = regime_data_i$N_q,
+      
+      monthly_missing = stats_M["missing"],
+      monthly_total   = stats_M["total"],
+      monthly_share   = stats_M["share"],
+      
+      quarterly_missing = stats_Q["missing"],
+      quarterly_total   = stats_Q["total"],
+      quarterly_share   = stats_Q["share"],
+      
+      total_missing = stats_all["missing"],
+      total_entries = stats_all["total"],
+      total_share   = stats_all["share"]
+    )
+  }
+  
+  dplyr::bind_rows(
+    lapply(
+      size_order,
+      function(size_i) {
+        build_one(
+          regime_obj   = selection_report$initial,
+          regime_label = "Initial calibration",
+          size_label   = size_i
+        )
+      }
+    ),
+    
+    lapply(
+      size_order,
+      function(size_i) {
+        build_one(
+          regime_obj   = selection_report$updated,
+          regime_label = "Post-COVID recalibration",
+          size_label   = size_i
+        )
+      }
+    )
+  ) %>%
+    dplyr::mutate(
+      regime = factor(
+        regime,
+        levels = c(
+          "Initial calibration",
+          "Post-COVID recalibration"
+        )
+      ),
+      
+      size = factor(
+        size,
+        levels = size_order
+      )
+    ) %>%
+    dplyr::arrange(regime, size)
+}
+
+build_latex_calibration_missing_matrix_table <- function(
+    tbl,
+    caption,
+    label,
+    note = paste0(
+      "\\textit{Notes:} Entries report unavailable predictor shares (\\%) ",
+      "at the two real-time calibration vintages used to freeze model ",
+      "complexity within each update regime. The same publication-delay mask ",
+      "used for hyperparameter selection is applied before computing ",
+      "availability. GDP is excluded. Quarterly predictors are represented on ",
+      "the monthly grid and therefore include structural within-quarter ",
+      "unavailability."
+    )
+) {
+  
+  required_cols <- c(
+    "regime",
+    "size",
+    "calibration_date",
+    "monthly_share",
+    "quarterly_share",
+    "total_share"
+  )
+  
+  missing_cols <- setdiff(required_cols, names(tbl))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Missing columns in calibration-availability table: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  latex_month_year <- function(x) {
+    
+    month_names <- c(
+      "Jan.", "Feb.", "Mar.", "Apr.",
+      "May", "Jun.", "Jul.", "Aug.",
+      "Sep.", "Oct.", "Nov.", "Dec."
+    )
+    
+    x <- as.Date(x)
+    
+    paste0(
+      month_names[as.integer(format(x, "%m"))],
+      "\\ ",
+      format(x, "%Y")
+    )
+  }
+  
+  fmt_share <- function(x) {
+    
+    if (is.na(x)) {
+      return("--")
+    }
+    
+    sprintf("%.1f", as.numeric(x))
+  }
+  
+  tab <- tbl %>%
+    dplyr::mutate(
+      regime_id = dplyr::case_when(
+        as.character(regime) == "Initial calibration" ~ "pre",
+        as.character(regime) == "Post-COVID recalibration" ~ "post",
+        TRUE ~ NA_character_
+      ),
+      
+      size = factor(
+        tolower(as.character(size)),
+        levels = c("small", "medium", "large")
+      ),
+      
+      calibration_date = as.Date(calibration_date)
+    )
+  
+  if (anyNA(tab$regime_id)) {
+    stop("Unknown regime label in tbl$regime.")
+  }
+  
+  make_regime_block <- function(
+    regime_key,
+    regime_title
+  ) {
+    
+    block <- tab %>%
+      dplyr::filter(.data$regime_id == regime_key) %>%
+      dplyr::arrange(size)
+    
+    if (nrow(block) != 3L) {
+      stop(
+        "Expected Small, Medium, and Large rows for ",
+        regime_key,
+        "."
+      )
+    }
+    
+    calibration_dates <- unique(block$calibration_date)
+    
+    if (length(calibration_dates) != 1L) {
+      stop(
+        "More than one calibration date found for ",
+        regime_key,
+        "."
+      )
+    }
+    
+    rows <- vapply(
+      seq_len(nrow(block)),
+      function(i) {
+        
+        paste0(
+          tools::toTitleCase(as.character(block$size[i])), " & ",
+          fmt_share(block$monthly_share[i]), " & ",
+          fmt_share(block$quarterly_share[i]), " & ",
+          fmt_share(block$total_share[i]),
+          " \\\\"
+        )
+      },
+      character(1)
+    )
+    
+    c(
+      paste0(
+        "\\rowcolor{regimegray}\n",
+        "\\multicolumn{4}{@{}c@{}}{\\textbf{",
+        regime_title,
+        " calibration:} ",
+        latex_month_year(calibration_dates),
+        "} \\\\[-0.18em]"
+      ),
+      "\\cmidrule(lr){1-4}",
+      rows
+    )
+  }
+  
+  body <- c(
+    make_regime_block(
+      regime_key   = "pre",
+      regime_title = "Pre-update"
+    ),
+    
+    "\\addlinespace[0.28em]",
+    
+    make_regime_block(
+      regime_key   = "post",
+      regime_title = "Post-update"
+    )
+  )
+  
+  paste0(
+    "\\begin{table}[!htbp]\n",
+    "\\centering\n",
+    "\\scriptsize\n",
+    "\\renewcommand{\\arraystretch}{1.08}\n",
+    "\\setlength{\\tabcolsep}{3.0pt}\n",
+    "\\definecolor{topgray}{gray}{0.92}\n",
+    "\\definecolor{regimegray}{gray}{0.94}\n\n",
+    
+    "\\caption{", escape_latex(caption), "}\n",
+    "\\label{", label, "}\n\n",
+    
+    "\\begin{tabularx}{\\textwidth}{@{}",
+    ">{\\centering\\arraybackslash}p{2.65cm}",
+    "@{\\hspace{0.55cm}}",
+    "*{3}{>{\\centering\\arraybackslash}X}",
+    "@{}}\n",
+    
+    "\\toprule\n",
+    
+    "\\cellcolor{topgray}\\textbf{Information set} & ",
+    "\\cellcolor{topgray}\\textbf{Monthly (\\%)} & ",
+    "\\cellcolor{topgray}\\textbf{Quarterly (\\%)} & ",
+    "\\cellcolor{topgray}\\textbf{All predictors (\\%)} \\\\\n",
+    
+    "\\midrule\n",
+    paste(body, collapse = "\n"),
+    
+    "\n\\bottomrule\n",
+    "\\end{tabularx}\n",
+    
+    "\\vspace{-0.08cm}\n",
+    "\\noindent\\parbox{\\textwidth}{\\centering\\scriptsize\n",
+    note,
+    "}\n",
+    
+    "\\end{table}\n"
+  )
+}
+
+# ==============================================================================
+# utils_results_05_unit_target_proxy.R
+# ==============================================================================
+# Unit-target proxy robustness tables:
+#   1. Unit-target RMSFEs.
+#   2. Unit-target / aggregate-target relative RMSFEs with DM tests.
+# ==============================================================================
+
+unit_proxy_sizes <- c("small", "medium", "large")
+
+unit_proxy_period_order <- c(
+  "Pre-COVID",
+  "COVID period",
+  "Post-COVID"
+)
+
+unit_proxy_vintage_order <- c("M1", "M2", "M3")
+
+
+# ==============================================================================
+# 1. FILE LOADING
+# ==============================================================================
+
+find_proxy_rt_file <- function(path_results,
+                               model,
+                               size,
+                               sel) {
+  
+  if (!dir.exists(path_results)) {
+    stop("`path_results` does not exist: ", path_results)
+  }
+  
+  pattern <- paste0(
+    "^rt_", model,
+    "_Size-", size,
+    "_sel-", sel,
+    ".*\\.rds$"
+  )
+  
+  files <- list.files(
+    path        = path_results,
+    pattern     = pattern,
+    full.names  = TRUE,
+    ignore.case = TRUE
+  )
+  
+  if (length(files) == 0L) {
+    stop(
+      "No pseudo-real-time result found for:\n",
+      "  model = ", model, "\n",
+      "  size  = ", size, "\n",
+      "  sel   = ", sel, "\n",
+      "  path  = ", path_results
+    )
+  }
+  
+  if (length(files) > 1L) {
+    
+    files <- files[
+      order(
+        file.info(files)$mtime,
+        decreasing = TRUE
+      )
+    ]
+    
+    message(
+      "Multiple files found for model = ", model,
+      ", Size = ", size,
+      ", sel = ", sel,
+      ". Using:\n",
+      files[1L]
+    )
+  }
+  
+  files[1L]
+}
+
+
+validate_proxy_rt_result <- function(result,
+                                     expected_proxy_mode,
+                                     expected_size,
+                                     expected_sel) {
+  
+  required_fields <- c(
+    "proxy_mode",
+    "stage",
+    "Size",
+    "sel",
+    "params",
+    "countries",
+    "dates_q",
+    "Y_q_all",
+    "pseudo_rt_all"
+  )
+  
+  missing_fields <- setdiff(required_fields, names(result))
+  
+  if (length(missing_fields) > 0L) {
+    stop(
+      "Saved result is missing: ",
+      paste(missing_fields, collapse = ", ")
+    )
+  }
+  
+  if (!identical(
+    tolower(as.character(result$proxy_mode)[1L]),
+    tolower(expected_proxy_mode)
+  )) {
+    stop(
+      "Proxy-mode mismatch. Expected `", expected_proxy_mode,
+      "`, found `", result$proxy_mode, "`."
+    )
+  }
+  
+  if (!identical(
+    tolower(as.character(result$stage)[1L]),
+    "pseudo_realtime"
+  )) {
+    stop(
+      "The saved object is not a pseudo-real-time result."
+    )
+  }
+  
+  if (!identical(
+    tolower(as.character(result$Size)[1L]),
+    tolower(expected_size)
+  )) {
+    stop(
+      "Size mismatch. Expected `", expected_size,
+      "`, found `", result$Size, "`."
+    )
+  }
+  
+  if (!identical(
+    tolower(as.character(result$sel)[1L]),
+    tolower(expected_sel)
+  )) {
+    stop(
+      "Selection-rule mismatch. Expected `", expected_sel,
+      "`, found `", result$sel, "`."
+    )
+  }
+  
+  invisible(TRUE)
+}
+
+
+load_proxy_rt_results <- function(path_results,
+                                  model,
+                                  proxy_mode,
+                                  sel,
+                                  sizes = unit_proxy_sizes) {
+  
+  sizes <- tolower(as.character(sizes))
+  
+  if (!setequal(sizes, unit_proxy_sizes)) {
+    stop(
+      "`sizes` must contain exactly: ",
+      paste(unit_proxy_sizes, collapse = ", ")
+    )
+  }
+  
+  sizes <- unit_proxy_sizes
+  
+  files <- vapply(
+    sizes,
+    function(size_i) {
+      find_proxy_rt_file(
+        path_results = path_results,
+        model        = model,
+        size         = size_i,
+        sel          = sel
+      )
+    },
+    character(1)
+  )
+  
+  results <- lapply(files, readRDS)
+  names(results) <- sizes
+  
+  for (size_i in sizes) {
+    
+    validate_proxy_rt_result(
+      result              = results[[size_i]],
+      expected_proxy_mode = proxy_mode,
+      expected_size       = size_i,
+      expected_sel        = sel
+    )
+  }
+  
+  list(
+    files   = files,
+    results = results
+  )
+}
+
+
+# ==============================================================================
+# 2. EVALUATION DATA FOR RMSFE AND DM TESTS
+# ==============================================================================
+
+unit_proxy_period <- function(date,
+                              params) {
+  
+  covid_start <- as.Date(params$covid_start)
+  covid_end   <- as.Date(params$covid_end)
+  
+  dplyr::case_when(
+    date < covid_start ~ "Pre-COVID",
+    date <= covid_end  ~ "COVID period",
+    TRUE               ~ "Post-COVID"
+  )
+}
+
+
+unit_proxy_quarter_id <- function(date) {
+  paste0(
+    lubridate::year(date),
+    "Q",
+    lubridate::quarter(date)
+  )
+}
+
+
+build_unit_proxy_actuals <- function(rt_result,
+                                     country_order) {
+  
+  y_q_all <- as.matrix(rt_result$Y_q_all)
+  dates_q <- as.Date(rt_result$dates_q)
+  
+  if (nrow(y_q_all) != length(dates_q)) {
+    stop("`Y_q_all` and `dates_q` have inconsistent dimensions.")
+  }
+  
+  if (is.null(colnames(y_q_all))) {
+    stop("`Y_q_all` must have country names.")
+  }
+  
+  missing_countries <- setdiff(country_order, colnames(y_q_all))
+  
+  if (length(missing_countries) > 0L) {
+    stop(
+      "The following countries are missing from `Y_q_all`: ",
+      paste(missing_countries, collapse = ", ")
+    )
+  }
+  
+  as.data.frame(
+    y_q_all,
+    check.names = FALSE
+  ) |>
+    tibble::as_tibble(.name_repair = "minimal") |>
+    dplyr::mutate(
+      date       = dates_q,
+      quarter_id = unit_proxy_quarter_id(date),
+      period     = unit_proxy_period(date, rt_result$params)
+    ) |>
+    tidyr::pivot_longer(
+      cols      = dplyr::all_of(country_order),
+      names_to  = "country",
+      values_to = "GDP"
+    ) |>
+    dplyr::transmute(
+      country    = as.character(country),
+      quarter_id = as.character(quarter_id),
+      GDP        = as.numeric(GDP),
+      period     = as.character(period)
+    )
+}
+
+
+build_unit_proxy_rt_for_dm <- function(rt_result,
+                                       country_order) {
+  
+  rt_df <- tibble::as_tibble(rt_result$pseudo_rt_all)
+  
+  required_cols <- c(
+    "date",
+    "country",
+    "nowcast",
+    "month_in_quarter"
+  )
+  
+  missing_cols <- setdiff(required_cols, names(rt_df))
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "`pseudo_rt_all` is missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  out <- rt_df |>
+    dplyr::transmute(
+      date    = as.Date(date),
+      country = as.character(country),
+      nowcast = as.numeric(nowcast),
+      type    = as.character(month_in_quarter)
+    ) |>
+    dplyr::filter(
+      country %in% country_order,
+      type %in% unit_proxy_vintage_order
+    )
+  
+  duplicated_rows <- out |>
+    dplyr::mutate(
+      quarter_id = unit_proxy_quarter_id(date)
+    ) |>
+    dplyr::count(
+      country,
+      quarter_id,
+      type
+    ) |>
+    dplyr::filter(n > 1L)
+  
+  if (nrow(duplicated_rows) > 0L) {
+    stop(
+      "More than one nowcast was found for at least one ",
+      "country-quarter-vintage combination."
+    )
+  }
+  
+  out
+}
+
+
+build_unit_proxy_evaluation <- function(rt_result,
+                                        country_order) {
+  
+  if (!exists("build_eval_df", mode = "function")) {
+    stop(
+      "`build_eval_df()` is not available. Source the results utilities ",
+      "containing the Diebold--Mariano helpers before running this code."
+    )
+  }
+  
+  rt_df <- build_unit_proxy_rt_for_dm(
+    rt_result    = rt_result,
+    country_order = country_order
+  )
+  
+  actual_df <- build_unit_proxy_actuals(
+    rt_result    = rt_result,
+    country_order = country_order
+  )
+  
+  build_eval_df(
+    df_rt = rt_df,
+    df_y  = actual_df
+  ) |>
+    dplyr::mutate(
+      country    = as.character(country),
+      quarter_id = as.character(quarter_id),
+      type       = as.character(type),
+      period     = as.character(period)
+    ) |>
+    dplyr::filter(
+      type %in% unit_proxy_vintage_order,
+      period %in% unit_proxy_period_order,
+      is.finite(GDP),
+      is.finite(nowcast),
+      is.finite(se)
+    )
+}
+
+
+match_unit_and_aggregate_evaluations <- function(eval_unit,
+                                                 eval_aggregate) {
+  
+  common <- eval_unit |>
+    dplyr::transmute(
+      country     = as.character(country),
+      quarter_id  = as.character(quarter_id),
+      type        = as.character(type),
+      period_unit = as.character(period),
+      GDP_unit    = as.numeric(GDP),
+      se_unit     = as.numeric(se)
+    ) |>
+    dplyr::inner_join(
+      eval_aggregate |>
+        dplyr::transmute(
+          country          = as.character(country),
+          quarter_id       = as.character(quarter_id),
+          type             = as.character(type),
+          period_aggregate = as.character(period),
+          GDP_aggregate    = as.numeric(GDP),
+          se_aggregate     = as.numeric(se)
+        ),
+      by = c("country", "quarter_id", "type")
+    )
+  
+  if (nrow(common) == 0L) {
+    stop(
+      "No common evaluable forecasts were found for the unit-target and ",
+      "aggregate-target designs."
+    )
+  }
+  
+  period_mismatch <- common |>
+    dplyr::filter(period_unit != period_aggregate)
+  
+  if (nrow(period_mismatch) > 0L) {
+    stop(
+      "The unit-target and aggregate-target designs assign different ",
+      "evaluation periods to common forecast observations."
+    )
+  }
+  
+  actual_mismatch <- common |>
+    dplyr::filter(
+      abs(GDP_unit - GDP_aggregate) > 1e-12
+    )
+  
+  if (nrow(actual_mismatch) > 0L) {
+    stop(
+      "The realised GDP values differ across the unit-target and ",
+      "aggregate-target result files."
+    )
+  }
+  
+  common |>
+    dplyr::transmute(
+      country,
+      quarter_id,
+      type,
+      period = period_unit,
+      se_unit,
+      se_aggregate
+    )
+}
+
+
+# ==============================================================================
+# 3. RMSFE RATIOS AND DIEBOLD--MARIANO TESTS
+# ==============================================================================
+
+compute_unit_proxy_comparison <- function(unit_result,
+                                          aggregate_result,
+                                          country_order) {
+  
+  if (!exists("build_dm_wide", mode = "function")) {
+    stop(
+      "`build_dm_wide()` is not available. Source the results utilities ",
+      "containing the Diebold--Mariano helpers before running this code."
+    )
+  }
+  
+  eval_unit <- build_unit_proxy_evaluation(
+    rt_result    = unit_result,
+    country_order = country_order
+  )
+  
+  eval_aggregate <- build_unit_proxy_evaluation(
+    rt_result    = aggregate_result,
+    country_order = country_order
+  )
+  
+  common_eval <- match_unit_and_aggregate_evaluations(
+    eval_unit      = eval_unit,
+    eval_aggregate = eval_aggregate
+  )
+  
+  rmsfe_table <- common_eval |>
+    dplyr::group_by(
+      country,
+      period,
+      type
+    ) |>
+    dplyr::summarise(
+      n_forecasts     = dplyr::n(),
+      rmsfe_unit      = sqrt(mean(se_unit)),
+      rmsfe_aggregate = sqrt(mean(se_aggregate)),
+      relative_rmsfe  = rmsfe_unit / rmsfe_aggregate,
+      .groups         = "drop"
+    )
+  
+  dm_result <- build_dm_wide(
+    eval_matrix    = eval_unit,
+    eval_benchmark = eval_aggregate,
+    benchmark_tag  = "aggregate",
+    alternative    = "less"
+  )
+  
+  dm_wide <- dm_result$wide
+  
+  p_cols <- paste0(
+    "p_aggregate_",
+    unit_proxy_vintage_order
+  )
+  
+  for (col_i in p_cols) {
+    if (!col_i %in% names(dm_wide)) {
+      dm_wide[[col_i]] <- NA_real_
+    }
+  }
+  
+  dm_long <- dm_wide |>
+    dplyr::select(
+      country,
+      period,
+      dplyr::all_of(p_cols)
+    ) |>
+    tidyr::pivot_longer(
+      cols         = dplyr::all_of(p_cols),
+      names_to     = "type",
+      names_prefix = "p_aggregate_",
+      values_to    = "p_value"
+    ) |>
+    dplyr::mutate(
+      country = as.character(country),
+      period  = as.character(period),
+      type    = as.character(type)
+    )
+  
+  rmsfe_table <- rmsfe_table |>
+    dplyr::left_join(
+      dm_long,
+      by = c("country", "period", "type")
+    )
+  
+  list(
+    evaluation_unit      = eval_unit,
+    evaluation_aggregate = eval_aggregate,
+    common_evaluation    = common_eval,
+    rmsfe                = rmsfe_table,
+    dm                   = dm_result
+  )
+}
+
+
+combine_unit_proxy_sizes <- function(comparisons_by_size,
+                                     country_order) {
+  
+  if (!setequal(
+    names(comparisons_by_size),
+    unit_proxy_sizes
+  )) {
+    stop(
+      "`comparisons_by_size` must contain: ",
+      paste(unit_proxy_sizes, collapse = ", ")
+    )
+  }
+  
+  long_df <- dplyr::bind_rows(
+    lapply(
+      unit_proxy_sizes,
+      function(size_i) {
+        comparisons_by_size[[size_i]]$rmsfe |>
+          dplyr::mutate(size = size_i)
+      }
+    )
+  ) |>
+    dplyr::mutate(
+      country = as.character(country),
+      period  = as.character(period),
+      type    = as.character(type),
+      size    = as.character(size)
+    )
+  
+  grid <- tidyr::expand_grid(
+    period  = unit_proxy_period_order,
+    country = country_order
+  )
+  
+  rmsfe_wide <- long_df |>
+    dplyr::select(
+      country,
+      period,
+      size,
+      type,
+      rmsfe_unit
+    ) |>
+    tidyr::pivot_wider(
+      names_from  = c(size, type),
+      values_from = rmsfe_unit,
+      names_glue  = "{size}_{type}"
+    )
+  
+  relative_wide <- long_df |>
+    dplyr::select(
+      country,
+      period,
+      size,
+      type,
+      relative_rmsfe,
+      p_value
+    ) |>
+    tidyr::pivot_wider(
+      names_from  = c(size, type),
+      values_from = c(relative_rmsfe, p_value),
+      names_glue  = "{.value}_{size}_{type}"
+    )
+  
+  rmsfe_columns <- unlist(
+    lapply(
+      unit_proxy_sizes,
+      function(size_i) {
+        paste0(
+          size_i,
+          "_",
+          unit_proxy_vintage_order
+        )
+      }
+    )
+  )
+  
+  relative_columns <- unlist(
+    lapply(
+      unit_proxy_sizes,
+      function(size_i) {
+        paste0(
+          "relative_rmsfe_",
+          size_i,
+          "_",
+          unit_proxy_vintage_order
+        )
+      }
+    )
+  )
+  
+  p_value_columns <- unlist(
+    lapply(
+      unit_proxy_sizes,
+      function(size_i) {
+        paste0(
+          "p_value_",
+          size_i,
+          "_",
+          unit_proxy_vintage_order
+        )
+      }
+    )
+  )
+  
+  for (col_i in rmsfe_columns) {
+    if (!col_i %in% names(rmsfe_wide)) {
+      rmsfe_wide[[col_i]] <- NA_real_
+    }
+  }
+  
+  for (col_i in c(relative_columns, p_value_columns)) {
+    if (!col_i %in% names(relative_wide)) {
+      relative_wide[[col_i]] <- NA_real_
+    }
+  }
+  
+  rmsfe_table <- grid |>
+    dplyr::left_join(
+      rmsfe_wide,
+      by = c("country", "period")
+    ) |>
+    dplyr::arrange(
+      factor(period, levels = unit_proxy_period_order),
+      factor(country, levels = country_order)
+    )
+  
+  relative_table <- grid |>
+    dplyr::left_join(
+      relative_wide,
+      by = c("country", "period")
+    ) |>
+    dplyr::arrange(
+      factor(period, levels = unit_proxy_period_order),
+      factor(country, levels = country_order)
+    )
+  
+  list(
+    rmsfe_table    = rmsfe_table,
+    relative_table = relative_table,
+    long_table     = long_df
+  )
+}
+
+
+# ==============================================================================
+# 4. LATEX FORMATTERS
+# ==============================================================================
+
+unit_proxy_p_to_stars <- function(p_value) {
+  
+  dplyr::case_when(
+    is.na(p_value)   ~ "",
+    p_value < 0.01   ~ "***",
+    p_value < 0.05   ~ "**",
+    p_value < 0.10   ~ "*",
+    TRUE             ~ ""
+  )
+}
+
+
+unit_proxy_fmt_number <- function(x,
+                                  digits = 3) {
+  
+  if (length(x) == 0L || !is.finite(x)) {
+    return("--")
+  }
+  
+  sprintf(
+    paste0("%.", digits, "f"),
+    x
+  )
+}
+
+
+unit_proxy_fmt_relative <- function(x,
+                                    p_value,
+                                    digits = 3) {
+  
+  value <- unit_proxy_fmt_number(
+    x      = x,
+    digits = digits
+  )
+  
+  stars <- unit_proxy_p_to_stars(p_value)
+  
+  if (
+    is.finite(x) &&
+    x < 1 &&
+    nzchar(stars)
+  ) {
+    value <- paste0(
+      value,
+      "\\textsuperscript{\\fontsize{4.4}{4.8}\\selectfont ",
+      stars,
+      "}"
+    )
+  }
+  
+  value
+}
+
+
+unit_proxy_table_to_latex <- function(table_df,
+                                      table_type = c("rmsfe", "relative"),
+                                      caption,
+                                      label,
+                                      country_order,
+                                      digits = 3,
+                                      note = NULL) {
+  
+  table_type <- match.arg(table_type)
+  
+  value_columns <- unlist(
+    lapply(
+      unit_proxy_sizes,
+      function(size_i) {
+        if (table_type == "rmsfe") {
+          paste0(size_i, "_", unit_proxy_vintage_order)
+        } else {
+          paste0(
+            "relative_rmsfe_",
+            size_i,
+            "_",
+            unit_proxy_vintage_order
+          )
+        }
+      }
+    )
+  )
+  
+  required_columns <- c(
+    "country",
+    "period",
+    value_columns
+  )
+  
+  if (table_type == "relative") {
+    
+    p_columns <- unlist(
+      lapply(
+        unit_proxy_sizes,
+        function(size_i) {
+          paste0(
+            "p_value_",
+            size_i,
+            "_",
+            unit_proxy_vintage_order
+          )
+        }
+      )
+    )
+    
+    required_columns <- c(
+      required_columns,
+      p_columns
+    )
+  }
+  
+  missing_columns <- setdiff(
+    required_columns,
+    names(table_df)
+  )
+  
+  if (length(missing_columns) > 0L) {
+    stop(
+      "The table is missing: ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+  
+  if (is.null(note)) {
+    
+    if (table_type == "rmsfe") {
+      note <- paste0(
+        "\\textit{Notes:} Entries are unit-target Matrix MF--TPRF RMSFEs ",
+        "computed over common evaluable forecasts."
+      )
+    } else {
+      note <- paste0(
+        "\\textit{Notes:} Entries are unit-target to aggregate-target RMSFE ",
+        "ratios. Values below one favour unit-target. Asterisks denote ",
+        "one-sided Diebold--Mariano rejections in favour of unit-target ",
+        "based on squared errors and a Newey--West HAC variance estimator ",
+        "($^{*}\\,p\\!<\\!0.10$, $^{**}\\,p\\!<\\!0.05$, ",
+        "$^{***}\\,p\\!<\\!0.01$)."
+      )
+    }
+  }
+  
+  table_df <- table_df |>
+    dplyr::mutate(
+      country = as.character(country),
+      period  = as.character(period)
+    ) |>
+    dplyr::arrange(
+      factor(period, levels = unit_proxy_period_order),
+      factor(country, levels = country_order)
+    )
+  
+  make_period_block <- function(period_i) {
+    
+    block_df <- table_df |>
+      dplyr::filter(period == period_i) |>
+      dplyr::arrange(
+        factor(country, levels = country_order)
+      )
+    
+    row_lines <- vapply(
+      country_order,
+      function(country_i) {
+        
+        row_i <- block_df |>
+          dplyr::filter(country == country_i)
+        
+        values_i <- vapply(
+          unit_proxy_sizes,
+          function(size_i) {
+            
+            vapply(
+              unit_proxy_vintage_order,
+              function(vintage_i) {
+                
+                if (nrow(row_i) == 0L) {
+                  return("\\utnum{--}")
+                }
+                
+                if (table_type == "rmsfe") {
+                  
+                  value_col <- paste0(
+                    size_i,
+                    "_",
+                    vintage_i
+                  )
+                  
+                  paste0(
+                    "\\utnum{",
+                    unit_proxy_fmt_number(
+                      x      = row_i[[value_col]][1L],
+                      digits = digits
+                    ),
+                    "}"
+                  )
+                  
+                } else {
+                  
+                  value_col <- paste0(
+                    "relative_rmsfe_",
+                    size_i,
+                    "_",
+                    vintage_i
+                  )
+                  
+                  p_col <- paste0(
+                    "p_value_",
+                    size_i,
+                    "_",
+                    vintage_i
+                  )
+                  
+                  paste0(
+                    "\\utnum{",
+                    unit_proxy_fmt_relative(
+                      x       = row_i[[value_col]][1L],
+                      p_value = row_i[[p_col]][1L],
+                      digits  = digits
+                    ),
+                    "}"
+                  )
+                }
+              },
+              character(1)
+            )
+          },
+          character(3)
+        )
+        
+        paste0(
+          paste(
+            c(country_i, unlist(values_i, use.names = FALSE)),
+            collapse = " & "
+          ),
+          " \\\\"
+        )
+      },
+      character(1)
+    )
+    
+    c(
+      "\\addlinespace[0.18em]",
+      "\\specialrule{0.06em}{0.10em}{0.16em}",
+      "\\rowcolor{matrixgray}",
+      paste0(
+        "\\multicolumn{10}{@{}l}{",
+        "\\fontsize{7.0}{7.7}\\selectfont\\textbf{",
+        period_i,
+        "}} \\\\[-0.18em]"
+      ),
+      "\\cmidrule{1-10}",
+      row_lines
+    )
+  }
+  
+  body <- paste(
+    unlist(
+      lapply(
+        unit_proxy_period_order,
+        make_period_block
+      ),
+      use.names = FALSE
+    ),
+    collapse = "\n"
+  )
+  
+  paste0(
+    "\\begin{table}[p]\n",
+    "\\centering\n",
+    "\\caption{", caption, "}\n",
+    "\\label{", label, "}\n",
+    "\\begingroup\n",
+    "\\fontsize{7.6}{8.4}\\selectfont\n",
+    "\\renewcommand{\\arraystretch}{0.86}\n",
+    "\\setlength{\\tabcolsep}{1.5pt}\n",
+    "\\newcommand{\\utnum}[1]{{\\fontsize{6.4}{7.0}\\selectfont #1}}\n",
+    "\\definecolor{topgray}{gray}{0.92}\n",
+    "\\definecolor{hypergray}{gray}{0.91}\n",
+    "\\definecolor{matrixgray}{gray}{0.965}\n",
+    "\\resizebox{0.98\\textwidth}{!}{%\n",
+    "\\begin{tabular}{@{}",
+    ">{\\centering\\arraybackslash}p{1.35cm}",
+    "@{\\hspace{0.18cm}}",
+    "*{3}{>{\\centering\\arraybackslash}p{1.40cm}}",
+    "@{\\hspace{0.18cm}}",
+    "*{3}{>{\\centering\\arraybackslash}p{1.40cm}}",
+    "@{\\hspace{0.18cm}}",
+    "*{3}{>{\\centering\\arraybackslash}p{1.40cm}}",
+    "@{}}\n",
+    "\\toprule\n",
+    "\\rowcolor{hypergray}\n",
+    " & \\multicolumn{3}{c}{\\textbf{Small}}",
+    " & \\multicolumn{3}{c}{\\textbf{Medium}}",
+    " & \\multicolumn{3}{c}{\\textbf{Large}} \\\\\n",
+    "\\cmidrule(lr){2-4}",
+    "\\cmidrule(lr){5-7}",
+    "\\cmidrule(lr){8-10}\n",
+    "\\rowcolor{topgray}\n",
+    "\\textbf{Country}",
+    " & \\textbf{M1} & \\textbf{M2} & \\textbf{M3}",
+    " & \\textbf{M1} & \\textbf{M2} & \\textbf{M3}",
+    " & \\textbf{M1} & \\textbf{M2} & \\textbf{M3} \\\\\n",
+    "\\midrule\n",
+    body,
+    "\n\\bottomrule\n",
+    "\\end{tabular}%\n",
+    "}\n",
+    "\\par\\vspace{0.05cm}\n",
+    "\\parbox{0.90\\linewidth}{\\centering\\fontsize{6.3}{6.9}\\selectfont ",
+    note,
+    "}\n",
+    "\\endgroup\n",
+    "\\end{table}\n"
+  )
+}
+
+# ==============================================================================
+# 5. MAIN FUNCTION
+# ==============================================================================
+
+make_unit_target_proxy_tables_from_files <- function(
+    path_results,
+    sel,
+    country_order = c(
+      "DE", "FR", "IT", "ES",
+      "NL", "BE", "AT", "PT"
+    ),
+    model_unit = "matrix_multivariate",
+    model_aggregate = "matrix_scalar",
+    digits = 3,
+    caption_rmsfe = NULL,
+    caption_relative = NULL,
+    label_rmsfe = NULL,
+    label_relative = NULL
+) {
+  
+  unit_loaded <- load_proxy_rt_results(
+    path_results = path_results,
+    model        = model_unit,
+    proxy_mode   = "multivariate",
+    sel          = sel
+  )
+  
+  aggregate_loaded <- load_proxy_rt_results(
+    path_results = path_results,
+    model        = model_aggregate,
+    proxy_mode   = "scalar",
+    sel          = sel
+  )
+  
+  comparisons_by_size <- lapply(
+    unit_proxy_sizes,
+    function(size_i) {
+      
+      compute_unit_proxy_comparison(
+        unit_result      = unit_loaded$results[[size_i]],
+        aggregate_result = aggregate_loaded$results[[size_i]],
+        country_order    = country_order
+      )
+    }
+  )
+  
+  names(comparisons_by_size) <- unit_proxy_sizes
+  
+  combined <- combine_unit_proxy_sizes(
+    comparisons_by_size = comparisons_by_size,
+    country_order       = country_order
+  )
+  
+  sel_label <- if (toupper(sel) == "LASSO") {
+    "LASSO-based selection"
+  } else {
+    "correlation screening"
+  }
+  
+  sel_tag <- if (toupper(sel) == "LASSO") {
+    "lasso"
+  } else {
+    "corr"
+  }
+  
+  if (is.null(caption_rmsfe)) {
+    caption_rmsfe <- paste0(
+      "Unit-target Matrix MF--TPRF RMSFE: ",
+      sel_label
+    )
+  }
+  
+  if (is.null(caption_relative)) {
+    caption_relative <- paste0(
+      "Relative RMSFE of unit-target to aggregate-target Matrix MF--TPRF: ",
+      sel_label
+    )
+  }
+  
+  if (is.null(label_rmsfe)) {
+    label_rmsfe <- paste0(
+      "tab:unit_target_rmsfe_",
+      sel_tag
+    )
+  }
+  
+  if (is.null(label_relative)) {
+    label_relative <- paste0(
+      "tab:unit_target_relative_rmsfe_",
+      sel_tag
+    )
+  }
+  
+  latex_rmsfe <- unit_proxy_table_to_latex(
+    table_df     = combined$rmsfe_table,
+    table_type   = "rmsfe",
+    caption      = caption_rmsfe,
+    label        = label_rmsfe,
+    country_order = country_order,
+    digits       = digits
+  )
+  
+  latex_relative <- unit_proxy_table_to_latex(
+    table_df     = combined$relative_table,
+    table_type   = "relative",
+    caption      = caption_relative,
+    label        = label_relative,
+    country_order = country_order,
+    digits       = digits
+  )
+  
+  invisible(
+    list(
+      files = list(
+        unit      = unit_loaded$files,
+        aggregate = aggregate_loaded$files
+      ),
+      comparisons_by_size = comparisons_by_size,
+      rmsfe_table         = combined$rmsfe_table,
+      relative_table      = combined$relative_table,
+      long_table          = combined$long_table,
+      latex_rmsfe         = latex_rmsfe,
+      latex_relative      = latex_relative
+    )
+  )
+}
+
+# ==============================================================================
+# EA NOWCAST COMPARISON HELPERS
+# ==============================================================================
+
+print_ea_console_table <- function(x) {
+  
+  if (!is.data.frame(x)) {
+    stop("`x` must be a data.frame.")
+  }
+  
+  if (nrow(x) == 0L) {
+    cat("No rows to print.\n")
+    return(invisible(x))
+  }
+  
+  print(
+    as.data.frame(x),
+    row.names = FALSE
+  )
+  
+  invisible(x)
+}
+
+
+make_ea_quarter_id <- function(date) {
+  
+  date <- as.Date(date)
+  
+  paste0(
+    lubridate::year(date),
+    "Q",
+    lubridate::quarter(date)
+  )
+}
+
+
+extract_matrix_ea_nowcasts <- function(
+    rt_obj,
+    month_order = c("M1", "M2", "M3")
+) {
+  
+  if (is.null(rt_obj$pseudo_rt_aggregate)) {
+    stop("Matrix RT object does not contain `pseudo_rt_aggregate`.")
+  }
+  
+  required_cols <- c(
+    "date",
+    "nowcast",
+    "month_in_quarter"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    names(rt_obj$pseudo_rt_aggregate)
+  )
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Matrix EA nowcast table is missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  rt_obj$pseudo_rt_aggregate %>%
+    dplyr::transmute(
+      date    = as.Date(date),
+      type    = as.character(month_in_quarter),
+      nowcast = as.numeric(nowcast),
+      model   = "Matrix MF-TPRF"
+    ) %>%
+    dplyr::filter(type %in% month_order)
+}
+
+
+extract_vector_ea_nowcasts <- function(
+    rt_obj,
+    month_order = c("M1", "M2", "M3")
+) {
+  
+  if (is.null(rt_obj$pseudo_realtime_all)) {
+    stop("Vector EA RT object does not contain `pseudo_realtime_all`.")
+  }
+  
+  required_cols <- c(
+    "date",
+    "nowcast",
+    "month_in_quarter"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    names(rt_obj$pseudo_realtime_all)
+  )
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Vector EA nowcast table is missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  rt_obj$pseudo_realtime_all %>%
+    dplyr::transmute(
+      date    = as.Date(date),
+      type    = as.character(month_in_quarter),
+      nowcast = as.numeric(nowcast),
+      model   = "VEC-C"
+    ) %>%
+    dplyr::filter(type %in% month_order)
+}
+
+
+extract_matrix_ea_gdp <- function(rt_obj) {
+  
+  if (is.null(rt_obj$Y_q_all) || is.null(rt_obj$dates_q)) {
+    stop("Matrix RT object does not contain `Y_q_all` and/or `dates_q`.")
+  }
+  
+  y_q_all <- as.matrix(rt_obj$Y_q_all)
+  dates_q <- as.Date(rt_obj$dates_q)
+  
+  if (nrow(y_q_all) != length(dates_q)) {
+    stop("Matrix EA GDP and quarterly dates have inconsistent lengths.")
+  }
+  
+  if (is.null(colnames(y_q_all))) {
+    stop("Matrix `Y_q_all` has no column names.")
+  }
+  
+  ea_col <- which(
+    toupper(colnames(y_q_all)) == "EA"
+  )
+  
+  if (length(ea_col) != 1L) {
+    stop("Could not uniquely identify the EA GDP column in Matrix `Y_q_all`.")
+  }
+  
+  data.frame(
+    date       = dates_q,
+    quarter_id = make_ea_quarter_id(dates_q),
+    GDP        = as.numeric(y_q_all[, ea_col]),
+    row.names  = NULL
+  )
+}
+
+
+extract_vector_ea_gdp <- function(rt_obj) {
+  
+  if (is.null(rt_obj$y_q) || is.null(rt_obj$dates_q)) {
+    stop("Vector EA RT object does not contain `y_q` and/or `dates_q`.")
+  }
+  
+  y_q     <- as.numeric(rt_obj$y_q)
+  dates_q <- as.Date(rt_obj$dates_q)
+  
+  if (length(y_q) != length(dates_q)) {
+    stop("Vector EA GDP and quarterly dates have inconsistent lengths.")
+  }
+  
+  data.frame(
+    date       = dates_q,
+    quarter_id = make_ea_quarter_id(dates_q),
+    GDP        = y_q,
+    row.names  = NULL
+  )
+}
+
+
+check_unique_nowcast_keys <- function(df, label) {
+  
+  duplicates <- df %>%
+    dplyr::count(date, type) %>%
+    dplyr::filter(n > 1L)
+  
+  if (nrow(duplicates) > 0L) {
+    stop(
+      label,
+      " contains duplicate nowcasts for at least one date-vintage pair."
+    )
+  }
+}
+
+
+check_common_ea_settings <- function(matrix_rt, vector_rt, sel_i) {
+  
+  matrix_params <- matrix_rt$params
+  vector_params <- vector_rt$params
+  
+  fields_to_match <- c(
+    "start_eval",
+    "covid_start",
+    "covid_end",
+    "covid_mask_m",
+    "covid_mask_q",
+    "n_m",
+    "n_q"
+  )
+  
+  for (field_i in fields_to_match) {
+    
+    if (is.null(matrix_params[[field_i]]) ||
+        is.null(vector_params[[field_i]])) {
+      stop(
+        "Missing parameter `", field_i,
+        "` in one of the EA RT objects."
+      )
+    }
+    
+    value_matrix <- paste(
+      as.character(matrix_params[[field_i]]),
+      collapse = "|"
+    )
+    
+    value_vector <- paste(
+      as.character(vector_params[[field_i]]),
+      collapse = "|"
+    )
+    
+    if (!identical(value_matrix, value_vector)) {
+      stop(
+        "Matrix and Vector EA runs differ in parameter `",
+        field_i,
+        "` for selection method ", sel_i, "."
+      )
+    }
+  }
+  
+  if (!identical(
+    tolower(as.character(matrix_rt$sel)),
+    tolower(as.character(sel_i))
+  )) {
+    stop("Loaded Matrix RT object does not match selection method: ", sel_i)
+  }
+  
+  if (!identical(
+    tolower(as.character(vector_rt$sel)),
+    tolower(as.character(sel_i))
+  )) {
+    stop("Loaded Vector RT object does not match selection method: ", sel_i)
+  }
+  
+  if (!identical(
+    as.character(matrix_params$end_eval),
+    as.character(vector_params$end_eval)
+  )) {
+    cat(
+      "\nEA comparison (", sel_i, "): Matrix and Vector have different ",
+      "`end_eval` dates. Only common nowcast dates are used.\n",
+      sep = ""
+    )
+  }
+}
+
+
+build_ea_nowcast_evaluation <- function(
+    df_nowcasts,
+    df_gdp,
+    selection
+) {
+  
+  required_nowcasts <- c(
+    "date",
+    "type",
+    "nowcast",
+    "model"
+  )
+  
+  required_gdp <- c(
+    "date",
+    "quarter_id",
+    "GDP"
+  )
+  
+  missing_nowcasts <- setdiff(
+    required_nowcasts,
+    names(df_nowcasts)
+  )
+  
+  missing_gdp <- setdiff(
+    required_gdp,
+    names(df_gdp)
+  )
+  
+  if (length(missing_nowcasts) > 0L) {
+    stop(
+      "Nowcast data are missing: ",
+      paste(missing_nowcasts, collapse = ", ")
+    )
+  }
+  
+  if (length(missing_gdp) > 0L) {
+    stop(
+      "GDP data are missing: ",
+      paste(missing_gdp, collapse = ", ")
+    )
+  }
+  
+  df_nowcasts_clean <- df_nowcasts %>%
+    dplyr::mutate(
+      date       = as.Date(date),
+      quarter_id = make_ea_quarter_id(date)
+    )
+  
+  df_gdp_clean <- df_gdp %>%
+    dplyr::transmute(
+      quarter_id = as.character(quarter_id),
+      target_date = as.Date(date),
+      GDP = as.numeric(GDP)
+    ) %>%
+    dplyr::filter(
+      is.finite(GDP)
+    )
+  
+  gdp_duplicates <- df_gdp_clean %>%
+    dplyr::distinct(
+      quarter_id,
+      GDP
+    ) %>%
+    dplyr::count(quarter_id) %>%
+    dplyr::filter(n > 1L)
+  
+  if (nrow(gdp_duplicates) > 0L) {
+    stop(
+      "More than one realised EA GDP value was found for at least one quarter."
+    )
+  }
+  
+  df_gdp_clean <- df_gdp_clean %>%
+    dplyr::distinct(
+      quarter_id,
+      .keep_all = TRUE
+    )
+  
+  df_nowcasts_clean %>%
+    dplyr::inner_join(
+      df_gdp_clean,
+      by = "quarter_id"
+    ) %>%
+    dplyr::mutate(
+      country   = "EA",
+      selection = as.character(selection),
+      error     = nowcast - GDP,
+      abs_error = abs(error),
+      se        = error^2
+    ) %>%
+    dplyr::arrange(
+      type,
+      model,
+      date
+    )
+}
+
+
+add_ea_evaluation_periods <- function(
+    df_eval,
+    params,
+    include_full_sample = TRUE
+) {
+  
+  required_cols <- c(
+    "target_date",
+    "country",
+    "quarter_id",
+    "type",
+    "model",
+    "selection",
+    "se"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    names(df_eval)
+  )
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "Evaluation data are missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  covid_start <- as.Date(params$covid_start)
+  covid_end   <- as.Date(params$covid_end)
+  
+  df_periods <- df_eval %>%
+    dplyr::mutate(
+      period = dplyr::case_when(
+        target_date < covid_start ~ "Pre-COVID",
+        target_date <= covid_end  ~ "COVID period",
+        target_date > covid_end   ~ "Post-COVID",
+        TRUE                      ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(period)
+    )
+  
+  if (isTRUE(include_full_sample)) {
+    
+    df_periods <- dplyr::bind_rows(
+      df_periods %>%
+        dplyr::mutate(
+          period = "Full sample"
+        ),
+      df_periods
+    )
+  }
+  
+  df_periods %>%
+    dplyr::mutate(
+      period = factor(
+        period,
+        levels = c(
+          "Full sample",
+          "Pre-COVID",
+          "COVID period",
+          "Post-COVID"
+        )
+      )
+    ) %>%
+    dplyr::arrange(
+      selection,
+      period,
+      type,
+      model,
+      date
+    )
+}
+
+
+report_ea_nowcast_deviations <- function(
+    df_eval,
+    threshold = 0.05,
+    selection_label = NULL
+) {
+  
+  threshold_pp <- 100 * threshold
+  
+  df_outliers <- df_eval %>%
+    dplyr::filter(
+      is.finite(GDP),
+      is.finite(nowcast),
+      is.finite(abs_error),
+      abs_error > threshold
+    ) %>%
+    dplyr::mutate(
+      GDP_pct           = 100 * GDP,
+      nowcast_pct       = 100 * nowcast,
+      forecast_error_pp = 100 * error,
+      abs_error_pp      = 100 * abs_error
+    ) %>%
+    dplyr::select(
+      date,
+      target_date,
+      type,
+      model,
+      GDP_pct,
+      nowcast_pct,
+      forecast_error_pp,
+      abs_error_pp
+    ) %>%
+    dplyr::arrange(
+      type,
+      model,
+      date
+    )
+  
+  cat(
+    "\n",
+    paste(rep("=", 88), collapse = ""),
+    "\n",
+    "EA NOWCAST DEVIATIONS ABOVE ",
+    format(threshold_pp, nsmall = 1),
+    " PERCENTAGE POINTS",
+    if (!is.null(selection_label)) {
+      paste0(" | ", selection_label)
+    } else {
+      ""
+    },
+    "\n",
+    paste(rep("=", 88), collapse = ""),
+    "\n",
+    sep = ""
+  )
+  
+  if (nrow(df_outliers) == 0L) {
+    
+    cat(
+      "No Matrix or VEC-C EA nowcast differs from realised EA GDP by more than ",
+      format(threshold_pp, nsmall = 1),
+      " percentage points.\n",
+      sep = ""
+    )
+    
+  } else {
+    
+    print_ea_console_table(df_outliers)
+  }
+  
+  invisible(df_outliers)
+}
+
+
+get_ea_gdp_ylim <- function(
+    df_gdp,
+    pad_frac = 0,
+    min_pad = 0
+) {
+  
+  if (!is.data.frame(df_gdp) || !"GDP" %in% names(df_gdp)) {
+    stop("`df_gdp` must be a data.frame containing `GDP`.")
+  }
+  
+  y_range <- range(
+    df_gdp$GDP,
+    na.rm = TRUE
+  )
+  
+  if (!all(is.finite(y_range))) {
+    stop("Cannot compute EA y-axis limits: GDP is entirely missing.")
+  }
+  
+  if (diff(y_range) == 0) {
+    y_pad <- max(
+      abs(y_range[1]) * 0.05,
+      0.001
+    )
+  } else {
+    y_pad <- max(
+      diff(y_range) * pad_frac,
+      min_pad
+    )
+  }
+  
+  c(
+    y_range[1] - y_pad,
+    y_range[2] + y_pad
+  )
+}
+
+
+# ==============================================================================
+# REPLACE EVERYTHING FROM compute_ea_rmsfe_by_period() TO THE END OF
+# matrix.mf.tprf.utils.R WITH THIS BLOCK
+# ==============================================================================
+
+compute_ea_rmsfe_by_period <- function(df_eval_periods) {
+  
+  df_eval_periods %>%
+    dplyr::filter(
+      is.finite(se)
+    ) %>%
+    dplyr::group_by(
+      selection,
+      period,
+      model,
+      type
+    ) %>%
+    dplyr::summarise(
+      N     = dplyr::n(),
+      RMSFE = sqrt(mean(se)),
+      .groups = "drop"
+    )
+}
+
+
+build_ea_rmsfe_table <- function(
+    df_rmsfe,
+    selection_order = c("LASSO", "corr"),
+    period_order = c(
+      "Full sample",
+      "Pre-COVID",
+      "COVID period",
+      "Post-COVID"
+    ),
+    month_order = c("M1", "M2", "M3"),
+    digits = 3
+) {
+  
+  required_cols <- c(
+    "selection",
+    "period",
+    "model",
+    "type",
+    "RMSFE"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    names(df_rmsfe)
+  )
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "RMSFE data are missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  table_rmsfe <- df_rmsfe %>%
+    dplyr::mutate(
+      selection = dplyr::case_when(
+        tolower(as.character(selection)) == "lasso" ~ "LASSO",
+        tolower(as.character(selection)) == "corr"  ~ "corr",
+        TRUE ~ as.character(selection)
+      ),
+      period = as.character(period),
+      type   = as.character(type),
+      model_key = dplyr::case_when(
+        model == "Matrix MF-TPRF" ~ "Matrix",
+        model == "VEC-C"          ~ "VecC",
+        TRUE                      ~ NA_character_
+      )
+    ) %>%
+    dplyr::filter(
+      !is.na(model_key),
+      type %in% month_order
+    ) %>%
+    dplyr::select(
+      selection,
+      period,
+      model_key,
+      type,
+      RMSFE
+    ) %>%
+    tidyr::pivot_wider(
+      names_from  = c(model_key, type),
+      values_from = RMSFE,
+      names_glue  = "{model_key}_{type}"
+    )
+  
+  required_value_cols <- c(
+    "Matrix_M1", "Matrix_M2", "Matrix_M3",
+    "VecC_M1", "VecC_M2", "VecC_M3"
+  )
+  
+  for (col_i in required_value_cols) {
+    if (!col_i %in% names(table_rmsfe)) {
+      table_rmsfe[[col_i]] <- NA_real_
+    }
+  }
+  
+  table_rmsfe %>%
+    dplyr::mutate(
+      Relative_M1 = Matrix_M1 / VecC_M1,
+      Relative_M2 = Matrix_M2 / VecC_M2,
+      Relative_M3 = Matrix_M3 / VecC_M3,
+      selection   = factor(
+        selection,
+        levels = selection_order
+      ),
+      period = factor(
+        period,
+        levels = period_order
+      )
+    ) %>%
+    dplyr::arrange(
+      selection,
+      period
+    ) %>%
+    dplyr::mutate(
+      dplyr::across(
+        c(
+          Matrix_M1,
+          Matrix_M2,
+          Matrix_M3,
+          VecC_M1,
+          VecC_M2,
+          VecC_M3,
+          Relative_M1,
+          Relative_M2,
+          Relative_M3
+        ),
+        ~ round(.x, digits)
+      ),
+      selection = as.character(selection),
+      period    = as.character(period)
+    )
+}
+
+
+make_latex_ea_rmsfe_table <- function(
+    df,
+    caption = "Pseudo-real-time EA GDP RMSFE: Matrix MF--TPRF versus VEC-C",
+    label = "tab:ea_rmsfe_matrix_vector_small",
+    digits = 3
+) {
+  
+  required_cols <- c(
+    "selection",
+    "period",
+    "Matrix_M1", "Matrix_M2", "Matrix_M3",
+    "VecC_M1", "VecC_M2", "VecC_M3",
+    "Relative_M1", "Relative_M2", "Relative_M3"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    names(df)
+  )
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "RMSFE table is missing: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  fmt <- function(x) {
+    ifelse(
+      is.na(x),
+      "--",
+      sprintf(
+        paste0("%.", digits, "f"),
+        x
+      )
+    )
+  }
+  
+  selection_labels <- c(
+    "LASSO" = "LASSO screening",
+    "corr"  = "Correlation screening"
+  )
+  
+  build_rows <- function(selection_i) {
+    
+    df_i <- df %>%
+      dplyr::filter(
+        selection == selection_i
+      )
+    
+    if (nrow(df_i) == 0L) {
+      return(character(0))
+    }
+    
+    selection_header <- paste0(
+      "\\rowcolor{hypergray}\n",
+      "\\multicolumn{10}{c}{\\textbf{",
+      selection_labels[[selection_i]],
+      "}} \\\\"
+    )
+    
+    row_lines <- vapply(
+      seq_len(nrow(df_i)),
+      function(i) {
+        
+        paste(
+          c(
+            df_i$period[i],
+            fmt(df_i$Matrix_M1[i]),
+            fmt(df_i$Matrix_M2[i]),
+            fmt(df_i$Matrix_M3[i]),
+            fmt(df_i$VecC_M1[i]),
+            fmt(df_i$VecC_M2[i]),
+            fmt(df_i$VecC_M3[i]),
+            fmt(df_i$Relative_M1[i]),
+            fmt(df_i$Relative_M2[i]),
+            fmt(df_i$Relative_M3[i])
+          ),
+          collapse = " & "
+        )
+      },
+      character(1)
+    )
+    
+    c(
+      selection_header,
+      "\\cmidrule(lr){1-10}",
+      paste0(
+        row_lines,
+        " \\\\"
+      )
+    )
+  }
+  
+  body <- c(
+    build_rows("LASSO"),
+    "\\addlinespace[0.35em]",
+    build_rows("corr")
+  )
+  
+  paste0(
+    "\\begin{table}[!htbp]\n",
+    "\\centering\n",
+    "\\scriptsize\n",
+    "\\renewcommand{\\arraystretch}{1.03}\n",
+    "\\setlength{\\tabcolsep}{3.0pt}\n",
+    "\\definecolor{topgray}{gray}{0.92}\n",
+    "\\definecolor{hypergray}{gray}{0.91}\n",
+    "\\caption{", caption, "}\n",
+    "\\label{", label, "}\n",
+    "\\resizebox{\\textwidth}{!}{%\n",
+    "\\begin{tabular}{lccc@{\\hspace{0.40cm}}ccc@{\\hspace{0.40cm}}ccc}\n",
+    "\\toprule\n",
+    " & \\multicolumn{3}{c}{\\textbf{Matrix MF--TPRF}}",
+    " & \\multicolumn{3}{c}{\\textbf{VEC-C}}",
+    " & \\multicolumn{3}{c}{\\textbf{Matrix / VEC-C}} \\\\\n",
+    "\\cmidrule(lr){2-4}",
+    "\\cmidrule(lr){5-7}",
+    "\\cmidrule(lr){8-10}\n",
+    "\\rowcolor{topgray}\n",
+    "\\textbf{Period}",
+    " & \\textbf{M1} & \\textbf{M2} & \\textbf{M3}",
+    " & \\textbf{M1} & \\textbf{M2} & \\textbf{M3}",
+    " & \\textbf{M1} & \\textbf{M2} & \\textbf{M3} \\\\\n",
+    "\\midrule\n",
+    paste(
+      body,
+      collapse = "\n"
+    ),
+    "\n\\bottomrule\n",
+    "\\end{tabular}%\n",
+    "}\n",
+    "\\vspace{0.05cm}\n",
+    "\\parbox{0.90\\linewidth}{\\centering\\footnotesize ",
+    "\\textit{Notes:} RMSFEs are computed over common Matrix--VEC-C EA ",
+    "pseudo-real-time forecasts. Relative RMSFEs below one favour Matrix MF--TPRF.}",
+    "\n",
+    "\\end{table}\n"
   )
 }

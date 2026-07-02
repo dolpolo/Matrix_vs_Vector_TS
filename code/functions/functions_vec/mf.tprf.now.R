@@ -29,6 +29,87 @@ unbalancedness <- function(X_full, dates, Freq, Unb, current_t) {
 }
 
 
+make_vector_regime_data <- function(all_countries, country, params,
+                                    label, selection_end) {  
+  obj  <- all_countries$data[[country]]
+  data <- obj$Data
+  
+  gdp_col     <- obj$target_col
+  target_name <- paste0(params$target, "_", country)
+  
+  y   <- as.matrix(data[, gdp_col, drop = FALSE])
+  y_q <- as.matrix(y[!is.na(y)])
+  
+  X <- as.matrix(data[, -gdp_col, drop = FALSE])
+  
+  N_m <- obj$nM
+  N_q_tot <- obj$nQ
+  
+  q_series_all <- obj$Series[(N_m + 1):(N_m + N_q_tot)]
+  q_cols <- which(toupper(q_series_all) != toupper(target_name))
+  
+  agg_m <- obj$agg_m
+  agg_q <- obj$agg_q[q_cols]
+  
+  Freq_m <- obj$freq_m
+  Freq_q <- obj$freq_q[q_cols]
+  
+  Unb_m <- obj$unb_m
+  Unb_q <- obj$unb_q[q_cols]
+  
+  Class_m <- obj$ClassM
+  Class_q <- obj$ClassQ[q_cols]
+  
+  stopifnot(length(c(Freq_m, Freq_q)) == ncol(X))
+  stopifnot(length(c(Unb_m, Unb_q)) == ncol(X))
+  stopifnot(length(c(agg_m, agg_q)) == ncol(X))
+  
+  list(
+    X_full = X,
+    y_q = y_q,
+    dates_m = obj$Dates,
+    dates_q = obj$DatesQ,
+    N_m = N_m,
+    N_q = length(q_cols),
+    N = N_m + length(q_cols),
+    agg_m = agg_m,
+    agg_q = agg_q,
+    Freq = c(Freq_m, Freq_q),
+    Unb = c(Unb_m, Unb_q),
+    Class = c(Class_m, Class_q),
+    selections = all_countries$sel, 
+    label = label,
+    selection_end = selection_end
+  )
+}
+
+make_vector_regime_data_from_tensor <- function(tensor, data, country, params,
+                                                label, selection_end) {
+  
+  ci <- prepare_country_inputs_from_tensor_vectorized(
+    tensor  = tensor,
+    data    = data,
+    country = country,
+    params  = params
+  )
+  
+  list(
+    X_full        = ci$X,
+    y_q           = ci$y_q,
+    dates_m       = ci$dates_m,
+    dates_q       = ci$dates_q,
+    N_m           = ci$N_m,
+    N_q           = ci$N_q,
+    N             = ci$N,
+    agg_m         = ci$agg_m,
+    agg_q         = ci$agg_q,
+    Freq          = ci$freq,
+    Unb           = ci$unb,
+    series_names  = ci$series_names,
+    label         = label,
+    selection_end = selection_end
+  )
+}
 # ==============================================================================
 # MONTH-IN-QUARTER INDEX
 # ==============================================================================
@@ -323,16 +404,11 @@ select_regime_hyperparameters_XP <- function(
 # ==============================================================================
 
 pseudo_realtime_MF_TPRF_XP <- function(
-    X_full,
-    y_q,
     params,
-    dates,
-    dates_q,
-    Freq,
-    Unb,
-    agg_m,
-    agg_q,
+    regime_data_pre,
+    regime_data_post = regime_data_pre,
     do_post_covid_recalibration = TRUE,
+    post_start_date = params$covid_end %m+% months(1),
     user_hyper_pre  = list(r_impute = NULL, Lproxy = NULL, p_AR = NULL, L_midas = NULL),
     user_hyper_post = list(r_impute = NULL, Lproxy = NULL, p_AR = NULL, L_midas = NULL),
     verbose = TRUE
@@ -340,6 +416,8 @@ pseudo_realtime_MF_TPRF_XP <- function(
   # Expanding pseudo real-time nowcast with fixed complexity within each regime.
   # Hyperparameters are selected only once per regime unless explicitly provided
   # by the user.
+  
+  dates   <- regime_data_pre$dates_m
   
   # --------------------------------------------------------------------------
   # Step 0. Evaluation window
@@ -383,15 +461,15 @@ pseudo_realtime_MF_TPRF_XP <- function(
   hyper_pre <- select_regime_hyperparameters_XP(
     calibration_t = t_est_end,
     regime_label  = "PRE-COVID",
-    X_full        = X_full,
-    y_q           = y_q,
+    X_full        = regime_data_pre$X_full,
+    y_q           = regime_data_pre$y_q,
     params        = params,
-    dates         = dates,
-    dates_q       = dates_q,
-    Freq          = Freq,
-    Unb           = Unb,
-    agg_m         = agg_m,
-    agg_q         = agg_q,
+    dates         = regime_data_pre$dates_m,
+    dates_q       = regime_data_pre$dates_q,
+    Freq          = regime_data_pre$Freq,
+    Unb           = regime_data_pre$Unb,
+    agg_m         = regime_data_pre$agg_m,
+    agg_q         = regime_data_pre$agg_q,
     user_hyper    = user_hyper_pre,
     verbose       = verbose
   )
@@ -401,19 +479,28 @@ pseudo_realtime_MF_TPRF_XP <- function(
   # --------------------------------------------------------------------------
   hyper_post <- hyper_pre
   
+  t_recalib <- which(dates >= params$covid_end)[1]
+  t_post_start <- which(dates >= post_start_date)[1]
+  
+  do_recalib <- isTRUE(do_post_covid_recalibration) &&
+    !is.na(t_recalib) &&
+    !is.na(t_post_start) &&
+    t_recalib <= t_end &&
+    t_post_start <= t_end
+  
   if (do_recalib) {
     hyper_post <- select_regime_hyperparameters_XP(
       calibration_t = t_recalib,
       regime_label  = "POST-COVID",
-      X_full        = X_full,
-      y_q           = y_q,
+      X_full        = regime_data_post$X_full,
+      y_q           = regime_data_post$y_q,
       params        = params,
-      dates         = dates,
-      dates_q       = dates_q,
-      Freq          = Freq,
-      Unb           = Unb,
-      agg_m         = agg_m,
-      agg_q         = agg_q,
+      dates         = regime_data_post$dates_m,
+      dates_q       = regime_data_post$dates_q,
+      Freq          = regime_data_post$Freq,
+      Unb           = regime_data_post$Unb,
+      agg_m         = regime_data_post$agg_m,
+      agg_q         = regime_data_post$agg_q,
       user_hyper    = user_hyper_post,
       verbose       = verbose
     )
@@ -434,8 +521,10 @@ pseudo_realtime_MF_TPRF_XP <- function(
     
     date_t <- dates[tt]
     
-    use_post <- do_recalib && tt >= t_recalib
-    active_hyper  <- if (use_post) hyper_post else hyper_pre
+    use_post <- do_recalib && tt >= t_post_start
+    
+    active_hyper <- if (use_post) hyper_post else hyper_pre
+    active_data  <- if (use_post) regime_data_post else regime_data_pre
     active_regime <- if (use_post) "POST-COVID" else "PRE-COVID"
     
     print_if_verbose(
@@ -450,16 +539,19 @@ pseudo_realtime_MF_TPRF_XP <- function(
       verbose = verbose
     )
     
+    tt_active <- which(active_data$dates_m == date_t)
+    if (length(tt_active) != 1L) next
+    
     obj_rt <- build_XP_agg_up_to(
-      X_full    = X_full,
-      y_q       = y_q,
-      dates     = dates,
-      dates_q   = dates_q,
-      Freq      = Freq,
-      Unb       = Unb,
-      current_t = tt,
-      agg_m     = agg_m,
-      agg_q     = agg_q,
+      X_full    = active_data$X_full,
+      y_q       = active_data$y_q,
+      dates     = active_data$dates_m,
+      dates_q   = active_data$dates_q,
+      Freq      = active_data$Freq,
+      Unb       = active_data$Unb,
+      current_t = tt_active,
+      agg_m     = active_data$agg_m,
+      agg_q     = active_data$agg_q,
       Kmax      = params$Kmax,
       r_impute  = active_hyper$r
     )
@@ -491,7 +583,7 @@ pseudo_realtime_MF_TPRF_XP <- function(
     
     y_rt_last <- tail(out$y_nowcast, 1)
     
-    m_tr <- compute_m_tr(date_t, dates_q)
+    m_tr <- compute_m_tr(date_t, active_data$dates_q)
     if (is.na(m_tr)) {
       print_if_verbose(
         "Skipped vintage: invalid month-within-quarter mapping.\n",
@@ -514,7 +606,12 @@ pseudo_realtime_MF_TPRF_XP <- function(
       r              = active_hyper$r,
       Lproxy         = active_hyper$Lproxy,
       p_AR           = active_hyper$p_AR,
-      L_midas        = active_hyper$L_midas
+      L_midas        = active_hyper$L_midas,
+      selection_label = active_data$label,
+      selection_end   = active_data$selection_end,
+      N_m             = active_data$N_m,
+      N_q             = active_data$N_q,
+      N               = active_data$N
     )
     
     print_if_verbose(
@@ -545,6 +642,23 @@ pseudo_realtime_MF_TPRF_XP <- function(
     M1 = now_M1,
     M2 = now_M2,
     M3 = now_M3,
-    vintage_log = vintage_log
+    vintage_log = vintage_log, 
+    
+    regime_info = list(
+      pre = list(
+        label = regime_data_pre$label,
+        selection_end = regime_data_pre$selection_end,
+        N_m = regime_data_pre$N_m,
+        N_q = regime_data_pre$N_q,
+        N = regime_data_pre$N
+      ),
+      post = list(
+        label = regime_data_post$label,
+        selection_end = regime_data_post$selection_end,
+        N_m = regime_data_post$N_m,
+        N_q = regime_data_post$N_q,
+        N = regime_data_post$N
+      )
+    )
   )
 }

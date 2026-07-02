@@ -34,6 +34,11 @@ library(lmtest)
 library(car)
 library(readxl)
 library(conflicted)
+library(future)
+library(future.apply)
+
+n_workers <- max(1, parallel::detectCores() - 1)
+future::plan(future::multisession, workers = n_workers)
 
 conflict_prefer("select", "dplyr", quiet = TRUE)
 conflict_prefer("filter", "dplyr", quiet = TRUE)
@@ -213,15 +218,43 @@ all_countries <- prepare_all_countries(
   covid_mask_q = params$covid_mask_q
 )
 
+selection_end_pre  <- params$start_eval %m-% months(1)
+selection_end_post <- params$covid_end
+
+all_countries_rt_pre <- prepare_all_countries(
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  covid_mask_m  = params$covid_mask_m,
+  covid_mask_q  = params$covid_mask_q,
+  selection_end = selection_end_pre
+)
+
+all_countries_rt_post <- prepare_all_countries(
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  covid_mask_m  = params$covid_mask_m,
+  covid_mask_q  = params$covid_mask_q,
+  selection_end = selection_end_post
+)
+
 # ==============================================================================
 # 7. CROSS-COUNTRY PIPELINE
 # ==============================================================================
 
 results_all <- run_all_countries_dfm(
-  countries     = countries,
-  all_countries = all_countries,
-  params        = params,
-  path_results  = path_results
+  countries              = countries,
+  all_countries          = all_countries,
+  all_countries_rt_pre   = all_countries_rt_pre,
+  all_countries_rt_post  = all_countries_rt_post,
+  selection_end_pre      = selection_end_pre,
+  selection_end_post     = selection_end_post,
+  params                 = params,
+  path_results           = path_results,
+  parallel               = TRUE
 )
 
 summary_all <- lapply(names(results_all), function(cc) {
@@ -430,3 +463,5 @@ cat(rt_plot_files$file_graph_rt_all, "\n")
 cat(rt_plot_files$file_graph_rt_big4, "\n")
 cat(rt_plot_files$file_graph_rt_other4, "\n")
 cat(rt_plot_files$file_graph_rt_post8, "\n")
+
+future::plan(future::sequential)

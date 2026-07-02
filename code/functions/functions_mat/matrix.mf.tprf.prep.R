@@ -193,13 +193,13 @@ LASSO_select <- function(y, X, lambda, K, alpha = 1) {
 # Selects variables most correlated with GDP for each country.
 # Returns base (country-independent) names for monthly and quarterly datasets.
 
-select_vars <- function(countries, params, path_raw, path_adj) {
+select_vars <- function(countries, params, path_raw, path_adj,
+                        selection_end = params$end_eval) {
   
   target <- params$target
   
-  # dates limits
   start_lim <- params$start_est
-  end_lim   <- params$end_eval
+  end_lim   <- selection_end
   
   sel_m <- list()
   sel_q <- list()
@@ -734,15 +734,19 @@ get_proxy_EA_target <- function(params, path_adj) {
 prepare_all_countries <- function(countries, params, path_raw, path_adj,
                                   covid_mask = TRUE,
                                   covid_mask_m,
-                                  covid_mask_q) {
+                                  covid_mask_q,
+                                  selection_end = params$end_eval) {
   
-  # Paesi effettivi (senza l’area aggregata usata come proxy, es. "EA")
   countries_eff <- setdiff(countries, params$target_cc)
   
-  # 1. Variable selection country-by-country (solo DE, FR, IT, ES)
-  vars_sel <- select_vars(countries_eff, params, path_raw, path_adj)
+  vars_sel <- select_vars(
+    countries     = countries_eff,
+    params        = params,
+    path_raw      = path_raw,
+    path_adj      = path_adj,
+    selection_end = selection_end
+  )
   
-  # 2. Prepare each country (DE, FR, IT, ES)
   out <- lapply(countries_eff, function(cc) {
     prepare_country_data(
       cc        = cc,
@@ -755,16 +759,15 @@ prepare_all_countries <- function(countries, params, path_raw, path_adj,
       covid_mask_q = params$covid_mask_q
     )
   })
+  
   names(out) <- countries_eff
   
-  # 3. Estrai anche la proxy aggregata (es. GDP EA)
   proxy_out <- get_proxy_EA_target(params, path_adj)
   
-  # 4. Output complessivo
   list(
-    data   = out,        # lista: DE, FR, IT, ES
-    sel    = vars_sel,   # variabili selezionate per ciascun paese
-    proxy  = proxy_out   # PIL aggregato EA (y_q + dates_q + nome colonna)
+    data  = out,
+    sel   = vars_sel,
+    proxy = proxy_out
   )
 }
 
@@ -1125,4 +1128,53 @@ selection_to_wide <- function(df_selection) {
       values_fill = 0
     ) %>%
     arrange(frequency, base_name)
+}
+
+
+# ==============================================================================
+# CREATE REGIME
+# ==============================================================================
+
+make_regime_data <- function(tensor_obj, label, selection_end, params) {
+  
+  Y_reg <- tensor_obj$Y
+  W_reg <- tensor_obj$W
+  
+  gdp_col_reg <- tensor_obj$target_col
+  
+  N_m_reg <- tensor_obj$n_M
+  N_q_tot_reg <- tensor_obj$n_Q
+  
+  q_series_all_reg <- tensor_obj$vars[(N_m_reg + 1):(N_m_reg + N_q_tot_reg)]
+  q_cols_reg <- which(tolower(q_series_all_reg) != tolower(params$target))
+  
+  X_reg <- Y_reg[, , -gdp_col_reg, drop = FALSE]
+  W_x_reg <- W_reg[, , -gdp_col_reg, drop = FALSE]
+  
+  agg_reg <- cbind(
+    tensor_obj$agg_M,
+    tensor_obj$agg_Q[, q_cols_reg, drop = FALSE]
+  )
+  
+  Unb_reg <- cbind(
+    tensor_obj$unb_M,
+    tensor_obj$unb_Q[, q_cols_reg, drop = FALSE]
+  )
+  
+  list(
+    label         = label,
+    selection_end = selection_end,
+    
+    X_full = X_reg,
+    W_full = W_x_reg,
+    Unb    = Unb_reg,
+    agg    = agg_reg,
+    
+    N_m = N_m_reg,
+    N_q = length(q_cols_reg),
+    N   = N_m_reg + length(q_cols_reg),
+    
+    vars = dimnames(X_reg)[[3]],
+    tensor = tensor_obj
+  )
 }

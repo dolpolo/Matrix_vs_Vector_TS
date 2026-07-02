@@ -31,6 +31,7 @@ dir.create(path_results_vec, recursive = TRUE, showWarnings = FALSE)
 dir.create(path_graph_vec,   recursive = TRUE, showWarnings = FALSE)
 dir.create(path_graph_rt,    recursive = TRUE, showWarnings = FALSE)
 
+
 # ==============================================================================
 # 1. PACKAGES
 # ==============================================================================
@@ -50,6 +51,15 @@ library(lmtest)
 library(car)
 library(readxl)
 library(conflicted)
+library(future)
+library(future.apply)
+library(progressr)
+handlers(global = TRUE)
+handlers("txtprogressbar")
+
+
+n_workers <- max(1, parallel::detectCores() - 1)
+future::plan(future::multisession, workers = n_workers)
 
 conflict_prefer("select", "dplyr", quiet = TRUE)
 conflict_prefer("filter", "dplyr", quiet = TRUE)
@@ -113,7 +123,7 @@ params <- list(
   target       = "GDP",
   target_cc    = "EA",
   
-  sel_method   = "corr",
+  sel_method   = "LASSO",
   n_m          = 25,
   n_q          = 15,
   thr_m        = 0.10,
@@ -141,23 +151,115 @@ model_name <- "vectensor"
 Size       <- get_size_tag(params$n_m, params$n_q)
 sel        <- params$sel_method
 
+path_cache <- file.path(path_results_vec, "_cache")
+cache_tag <- paste0(
+  "sel-", params$sel_method,
+  "_Nm-", params$n_m,
+  "_Nq-", params$n_q,
+  "_eval-", format(params$start_eval, "%Y%m"), "_", format(params$end_eval, "%Y%m"),
+  "_covidM-", as.integer(params$covid_mask_m),
+  "_covidQ-", as.integer(params$covid_mask_q)
+)
+dir.create(path_cache, recursive = TRUE, showWarnings = FALSE)
+
 # ==============================================================================
-# 5. PREPARE DATA AND BUILD TENSOR
+# 5. BUILD CACHE
 # ==============================================================================
 
-all_countries <- prepare_all_countries(
-  countries    = countries,
-  params       = params,
-  path_raw     = path_data_raw,
-  path_adj     = path_data_adj,
-  covid_mask_m = params$covid_mask_m,
-  covid_mask_q = params$covid_mask_q
+build_or_load_tensor_cache <- function(cache_file, countries, params, path_raw, path_adj,
+                                       selection_end, var_scope = "union",
+                                       cache_tag = NA_character_) {
+  
+  if (file.exists(cache_file)) {
+    cat("\nLoading cached tensor:\n", cache_file, "\n")
+    return(readRDS(cache_file))
+  }
+  
+  cat("\nBuilding tensor and saving cache:\n", cache_file, "\n")
+  
+  all_countries_obj <- prepare_all_countries(
+    countries     = countries,
+    params        = params,
+    path_raw      = path_raw,
+    path_adj      = path_adj,
+    covid_mask_m  = params$covid_mask_m,
+    covid_mask_q  = params$covid_mask_q,
+    selection_end = selection_end
+  )
+  
+  tensor_obj <- build_tensor(all_countries_obj, params, var_scope = var_scope)
+  
+  data_obj <- tensor_to_vector(
+    X_tens = tensor_obj$Y,
+    N_m    = tensor_obj$n_M,
+    N_q    = tensor_obj$n_Q
+  )
+  
+  out <- list(
+    all_countries = all_countries_obj,
+    tensor        = tensor_obj,
+    data          = data_obj,
+    selection_end = selection_end,
+    var_scope     = var_scope,
+    cache_tag     = cache_tag
+  )
+  
+  saveRDS(out, cache_file)
+  out
+}
+# ==============================================================================
+# 6. PREPARE DATA AND BUILD TENSOR
+# ==============================================================================
+
+selection_end_full <- params$end_eval
+selection_end_pre  <- params$start_eval %m-% months(1)
+selection_end_post <- params$covid_end
+
+cache_full <- file.path(path_cache, paste0("vectensor_full_", cache_tag, ".rds"))
+cache_pre  <- file.path(path_cache, paste0("vectensor_pre_",  cache_tag, ".rds"))
+cache_post <- file.path(path_cache, paste0("vectensor_post_", cache_tag, ".rds"))
+
+obj_full <- build_or_load_tensor_cache(
+  cache_file    = cache_full,
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  selection_end = selection_end_full,
+  var_scope     = "union"
 )
 
-tensor <- build_tensor(all_countries, params, var_scope = "union")
-data   <- tensor_to_vector(X_tens = tensor$Y, N_m = tensor$n_M, N_q = tensor$n_Q)
+obj_pre <- build_or_load_tensor_cache(
+  cache_file    = cache_pre,
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  selection_end = selection_end_pre,
+  var_scope     = "union"
+)
 
-nan_percent_Y(tensor$Y)
+obj_post <- build_or_load_tensor_cache(
+  cache_file    = cache_post,
+  countries     = countries,
+  params        = params,
+  path_raw      = path_data_raw,
+  path_adj      = path_data_adj,
+  selection_end = selection_end_post,
+  var_scope     = "union"
+)
+
+all_countries <- obj_full$all_countries
+tensor        <- obj_full$tensor
+data          <- obj_full$data
+
+all_countries_rt_pre <- obj_pre$all_countries
+tensor_pre           <- obj_pre$tensor
+data_pre             <- obj_pre$data
+
+all_countries_rt_post <- obj_post$all_countries
+tensor_post           <- obj_post$tensor
+data_post             <- obj_post$data
 
 # ==============================================================================
 # 6. SOURCE VECTOR FUNCTIONS
@@ -171,16 +273,24 @@ source(file.path(path_func_vec, "mf.tprf.R"))
 source(file.path(path_func_vec, "mf.tprf.now.R"))
 source(file.path(path_func_vec, "mf.tprf.all_cc_results.R"))
 
+
 # ==============================================================================
 # 7. CROSS-COUNTRY PIPELINE
 # ==============================================================================
 
 results_all <- run_all_countries_mf_tprf_from_tensor(
-  countries    = countries,
-  tensor       = tensor,
-  data         = data,
-  params       = params,
-  path_results = path_results_vec
+  countries          = countries,
+  tensor             = tensor,
+  data               = data,
+  tensor_pre         = tensor_pre,
+  data_pre           = data_pre,
+  tensor_post        = tensor_post,
+  data_post          = data_post,
+  selection_end_pre  = selection_end_pre,
+  selection_end_post = selection_end_post,
+  params             = params,
+  path_results       = path_results_vec,
+  parallel           = TRUE
 )
 
 summary_all <- lapply(names(results_all), function(cc) {
@@ -208,62 +318,62 @@ cross_out <- build_cross_country_outputs(
 # 7. LOAD PREVIOUSLY SAVED SUMMARY
 # ==============================================================================
 
-file_summary_cross <- build_result_filename(
-  path_out         = path_results_vec,
-  model            = model_name,
-  stage            = "summary",
-  Size             = Size,
-  sel              = sel,
-  countries        = setdiff(countries, params$target_cc),
-  N_m              = params$n_m,
-  N_q              = params$n_q,
-  Lproxy           = NA,
-  L_midas          = NA,
-  p_ar             = NA,
-  r1               = NA,
-  r2               = NA,
-  robust_f         = as.integer(isTRUE(params$Robust_F)),
-  covid_m          = as.integer(isTRUE(params$covid_mask_m)),
-  covid_q          = as.integer(isTRUE(params$covid_mask_q)),
-  ext              = "rds",
-  timestamp        = FALSE,
-  include_details  = TRUE
-)
+# file_summary_cross <- build_result_filename(
+#   path_out         = path_results_vec,
+#   model            = model_name,
+#   stage            = "summary",
+#   Size             = Size,
+#   sel              = sel,
+#   countries        = setdiff(countries, params$target_cc),
+#   N_m              = params$n_m,
+#   N_q              = params$n_q,
+#   Lproxy           = NA,
+#   L_midas          = NA,
+#   p_ar             = NA,
+#   r1               = NA,
+#   r2               = NA,
+#   robust_f         = as.integer(isTRUE(params$Robust_F)),
+#   covid_m          = as.integer(isTRUE(params$covid_mask_m)),
+#   covid_q          = as.integer(isTRUE(params$covid_mask_q)),
+#   ext              = "rds",
+#   timestamp        = FALSE,
+#   include_details  = TRUE
+# )
 
-summary_cross <- readRDS(file_summary_cross)
+# summary_cross <- readRDS(file_summary_cross)
 
-cross_out <- list(
-  hyper_full_all         = summary_cross$hyper_full_all,
-  hyper_rt_pre_all       = summary_cross$hyper_rt_pre_all,
-  hyper_rt_post_all      = summary_cross$hyper_rt_post_all,
-  df_now_full_all        = summary_cross$df_now_full_all,
-  df_quarterly_all       = summary_cross$df_quarterly_all,
-  plot_nowcast_facet     = summary_cross$plot_nowcast_facet,
-  tab_insample_all       = summary_cross$tab_insample_all,
-  latex_tab_insample_all = summary_cross$latex_tab_insample_all,
-  df_rt_all              = summary_cross$df_rt_all,
-  df_yq_eval_all         = summary_cross$df_yq_eval_all,
-  plot_rt_facet          = summary_cross$plot_rt_facet,
-  tab_rt_all             = summary_cross$tab_rt_all,
-  latex_tab_rt_all       = summary_cross$latex_tab_rt_all
-)
+# cross_out <- list(
+#  hyper_full_all         = summary_cross$hyper_full_all,
+#  hyper_rt_pre_all       = summary_cross$hyper_rt_pre_all,
+#  hyper_rt_post_all      = summary_cross$hyper_rt_post_all,
+#  df_now_full_all        = summary_cross$df_now_full_all,
+#  df_quarterly_all       = summary_cross$df_quarterly_all,
+#  plot_nowcast_facet     = summary_cross$plot_nowcast_facet,
+#  tab_insample_all       = summary_cross$tab_insample_all,
+#  latex_tab_insample_all = summary_cross$latex_tab_insample_all,
+#  df_rt_all              = summary_cross$df_rt_all,
+#  df_yq_eval_all         = summary_cross$df_yq_eval_all,
+#  plot_rt_facet          = summary_cross$plot_rt_facet,
+#  tab_rt_all             = summary_cross$tab_rt_all,
+#  latex_tab_rt_all       = summary_cross$latex_tab_rt_all
+#)
 
-rt_plot_variants <- summary_cross$rt_plot_variants
-rt_plot_files    <- summary_cross$rt_plot_files
+# rt_plot_variants <- summary_cross$rt_plot_variants
+# rt_plot_files    <- summary_cross$rt_plot_files
 
-graph_titles <- summary_cross$graph_titles
+# graph_titles <- summary_cross$graph_titles
 
-missing_by_country <- if (!is.null(summary_cross$missing_by_country)) {
-  summary_cross$missing_by_country
-} else {
-  NULL
-}
+# missing_by_country <- if (!is.null(summary_cross$missing_by_country)) {
+#  summary_cross$missing_by_country
+#} else {
+#  NULL
+#}
 
 # ==============================================================================
 # 7B. REAL-TIME PLOT VARIANTS
 # ==============================================================================
 
-summary_cross <- readRDS(file_summary_cross)
+# summary_cross <- readRDS(file_summary_cross)
 
 rt_plot_variants <- build_rt_plot_variants(
   df_rt_all      = cross_out$df_rt_all,
@@ -549,4 +659,6 @@ if (!is.null(rt_plot_files$file_graph_rt_by_country) && length(rt_plot_files$fil
     cat(rt_plot_files$file_graph_rt_by_country[[cc]], "\n")
   }
 }
+
+future::plan(future::sequential)
 

@@ -288,20 +288,34 @@ select_regime_hyperparameters_dfm <- function(
 }
 
 
+make_dfm_regime_data <- function(all_countries, country, label, selection_end) {
+  
+  obj <- all_countries$data[[country]]
+  
+  list(
+    X_full        = obj$Data,
+    dates_m       = obj$Dates,
+    dates_q       = obj$DatesQ,
+    series        = obj$Series,
+    gdp_col       = obj$target_col,
+    target_name   = obj$target_name,
+    N_m           = obj$nM,
+    N_q           = obj$nQ,
+    Freq          = c(obj$freq_m, obj$freq_q),
+    Unb           = c(obj$unb_m, obj$unb_q),
+    agg           = c(obj$agg_m, obj$agg_q),
+    label         = label,
+    selection_end = selection_end
+  )
+}
 # ==============================================================================
 # EXPANDING PSEUDO REAL-TIME DFM WITH FIXED HYPERPARAMETERS WITHIN REGIME
 # ==============================================================================
 
 pseudo_realtime_DFM_EM_reestimate <- function(
-    X_full,        # T x N raw panel (NOT standardized), includes GDP
-    NQ,            # number of quarterly variables (at the end of X_full)
-    params,        # must contain at least start_eval, end_eval, covid_end, restr, Kmax, kappa
-    dates_m,       # monthly Date vector, length T
-    dates_q,       # quarter-end Date vector
-    Freq,          # length N, "M"/"Q"
-    Unb,           # length N, publication delays
-    gdp_col,       # GDP column index in X_full / C
-    agg,           # length N or length NQ
+    regime_data_pre,
+    regime_data_post,
+    params,
     do_post_covid_recalibration = TRUE,
     user_hyper_pre  = list(r = NULL, p = NULL, q = NULL),
     user_hyper_post = list(r = NULL, p = NULL, q = NULL),
@@ -312,6 +326,16 @@ pseudo_realtime_DFM_EM_reestimate <- function(
     min_est_T   = 24,
     verbose     = TRUE
 ) {
+  
+  dates_m <- regime_data_pre$dates_m
+  dates_q <- regime_data_pre$dates_q
+  
+  if (!identical(as.Date(regime_data_pre$dates_m), as.Date(regime_data_post$dates_m))) {
+    stop("Pre and post regime monthly dates are not aligned.")
+  }
+  if (!identical(as.Date(regime_data_pre$dates_q), as.Date(regime_data_post$dates_q))) {
+    stop("Pre and post regime quarterly dates are not aligned.")
+  }
   
   # ---------------------------------------------------------------------------
   # Helpers
@@ -386,20 +410,19 @@ pseudo_realtime_DFM_EM_reestimate <- function(
   # ---------------------------------------------------------------------------
   hyper_pre <- select_regime_hyperparameters_dfm(
     calibration_t = t_est_end,
-    regime_label  = "PRE-COVID",
-    X_full        = X_full,
+    regime_label  = regime_data_pre$label,
+    X_full        = regime_data_pre$X_full,
     params        = params,
-    dates_m       = dates_m,
-    Freq          = Freq,
-    Unb           = Unb,
-    NQ            = NQ,
+    dates_m       = regime_data_pre$dates_m,
+    Freq          = regime_data_pre$Freq,
+    Unb           = regime_data_pre$Unb,
+    NQ            = regime_data_pre$N_q,
     user_hyper    = user_hyper_pre,
     pmax          = pmax,
     qmax          = qmax,
     min_est_T     = min_est_T,
     verbose       = verbose
   )
-  
   # ---------------------------------------------------------------------------
   # 2. Select or accept POST-COVID hyperparameters
   # ---------------------------------------------------------------------------
@@ -408,13 +431,13 @@ pseudo_realtime_DFM_EM_reestimate <- function(
   if (do_recalib) {
     hyper_post <- select_regime_hyperparameters_dfm(
       calibration_t = t_recalib,
-      regime_label  = "POST-COVID",
-      X_full        = X_full,
+      regime_label  = regime_data_post$label,
+      X_full        = regime_data_post$X_full,
       params        = params,
-      dates_m       = dates_m,
-      Freq          = Freq,
-      Unb           = Unb,
-      NQ            = NQ,
+      dates_m       = regime_data_post$dates_m,
+      Freq          = regime_data_post$Freq,
+      Unb           = regime_data_post$Unb,
+      NQ            = regime_data_post$N_q,
       user_hyper    = user_hyper_post,
       pmax          = pmax,
       qmax          = qmax,
@@ -446,6 +469,14 @@ pseudo_realtime_DFM_EM_reestimate <- function(
     use_post <- do_recalib && tt >= t_recalib
     active_hyper  <- if (use_post) hyper_post else hyper_pre
     active_regime <- if (use_post) "POST-COVID" else "PRE-COVID"
+    active_data <- if (use_post) regime_data_post else regime_data_pre
+    
+    X_full <- active_data$X_full
+    Freq   <- active_data$Freq
+    Unb    <- active_data$Unb
+    NQ     <- active_data$N_q
+    gdp_col <- active_data$gdp_col
+    agg    <- active_data$agg
     
     print_if_verbose(
       "\n------------------------------------------------------------\n",
@@ -632,6 +663,22 @@ pseudo_realtime_DFM_EM_reestimate <- function(
       p         = hyper_post$p,
       q         = hyper_post$q,
       t_recalib = if (do_recalib) dates_m[t_recalib] else NA
+    ),
+    regime_info = list(
+      pre = list(
+        label = regime_data_pre$label,
+        selection_end = regime_data_pre$selection_end,
+        N_m = regime_data_pre$N_m,
+        N_q = regime_data_pre$N_q,
+        series = regime_data_pre$series
+      ),
+      post = list(
+        label = regime_data_post$label,
+        selection_end = regime_data_post$selection_end,
+        N_m = regime_data_post$N_m,
+        N_q = regime_data_post$N_q,
+        series = regime_data_post$series
+      )
     ),
     
     M1_std  = unlist(now_M1_std),
