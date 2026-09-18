@@ -670,3 +670,1099 @@ cat(
   path_ea_nowcast_plots,
   "\n"
 )
+
+# ==============================================================================
+# 8. IN-SAMPLE FACTOR INTERPRETATION
+# QoQ vs YoY EA GDP growth
+# ==============================================================================
+
+# IMPORTANT:
+# The in-sample factor interpretation exercise reported in the slides
+# uses the SMALL + CORRELATION specification.
+
+sel_factor <- "LASSO"
+
+
+# ------------------------------------------------------------------------------
+# 8.1 LOAD FULL-SAMPLE FIT OBJECTS
+# ------------------------------------------------------------------------------
+
+file_matrix_fit_ea <- find_result_file(
+  path  = path_matrix_results,
+  model = matrix_model_name,
+  stage = "fit",
+  Size  = size_ea,
+  sel   = sel_factor
+)
+
+file_vector_fit_ea <- find_result_file(
+  path  = path_vector_results_ea,
+  model = "vector",
+  stage = "fit",
+  Size  = size_ea,
+  sel   = sel_factor
+)
+
+matrix_fit_ea <- readRDS(file_matrix_fit_ea)
+vector_fit_ea <- readRDS(file_vector_fit_ea)
+
+cat(
+  "\nLoaded Matrix fit:\n",
+  file_matrix_fit_ea,
+  "\n"
+)
+
+cat(
+  "\nLoaded Vector fit:\n",
+  file_vector_fit_ea,
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.2 EA GDP: QoQ AND YoY LOG GROWTH
+# ------------------------------------------------------------------------------
+
+# Use the GDP target stored in the SAME Matrix full-sample fit object.
+# This avoids relying on `matrix_rt_ea`, which is overwritten inside the
+# previous Corr/LASSO real-time loop.
+
+dates_q <- as.Date(matrix_fit_ea$dates_q)
+
+Y_q_all_fit <- matrix_fit_ea$target$y_q_all
+
+if (!is.null(colnames(Y_q_all_fit)) &&
+    "EA" %in% colnames(Y_q_all_fit)) {
+  
+  y_q_qoq <- as.numeric(
+    Y_q_all_fit[, "EA"]
+  )
+  
+} else {
+  
+  gdp_col_fit <- matrix_fit_ea$target$gdp_col
+  
+  y_q_qoq <- as.numeric(
+    Y_q_all_fit[, gdp_col_fit]
+  )
+}
+
+if (length(y_q_qoq) != length(dates_q)) {
+  stop(
+    "GDP target and quarterly-date vectors have different lengths."
+  )
+}
+
+# Current target:
+#
+# GDP_QoQ_t = log(GDP_t) - log(GDP_{t-1})
+#
+# Therefore:
+#
+# GDP_YoY_t = log(GDP_t) - log(GDP_{t-4})
+#           = GDP_QoQ_t
+#             + GDP_QoQ_{t-1}
+#             + GDP_QoQ_{t-2}
+#             + GDP_QoQ_{t-3}
+
+y_q_yoy <- y_q_qoq +
+  dplyr::lag(y_q_qoq, 1) +
+  dplyr::lag(y_q_qoq, 2) +
+  dplyr::lag(y_q_qoq, 3)
+
+df_gdp_growth <- data.frame(
+  date    = dates_q,
+  GDP_QoQ = y_q_qoq,
+  GDP_YoY = y_q_yoy
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.3 BUILD MATRIX FACTOR DATA
+# ------------------------------------------------------------------------------
+
+df_factor_matrix <- data.frame(
+  date = as.Date(
+    matrix_fit_ea$fit$factors$dates_q
+  ),
+  M1 = as.numeric(
+    matrix_fit_ea$fit$factors$F1[, 1]
+  ),
+  M2 = as.numeric(
+    matrix_fit_ea$fit$factors$F2[, 1]
+  ),
+  M3 = as.numeric(
+    matrix_fit_ea$fit$factors$F3[, 1]
+  )
+) %>%
+  dplyr::mutate(
+    F_quarter = (M1 + M2 + M3) / 3
+  )
+
+
+# ------------------------------------------------------------------------------
+# 8.4 BUILD VECTOR FACTOR DATA
+# ------------------------------------------------------------------------------
+
+df_factor_vector <- data.frame(
+  date = as.Date(
+    vector_fit_ea$dates_q
+  ),
+  M1 = as.numeric(
+    vector_fit_ea$fit$F1[, 1]
+  ),
+  M2 = as.numeric(
+    vector_fit_ea$fit$F2[, 1]
+  ),
+  M3 = as.numeric(
+    vector_fit_ea$fit$F3[, 1]
+  )
+) %>%
+  dplyr::mutate(
+    F_quarter = (M1 + M2 + M3) / 3
+  )
+
+
+# ------------------------------------------------------------------------------
+# 8.5 CHECK FACTOR COVERAGE
+# ------------------------------------------------------------------------------
+
+cat(
+  "\nMatrix factor sample:",
+  format(
+    min(df_factor_matrix$date),
+    "%Y-%m-%d"
+  ),
+  "to",
+  format(
+    max(df_factor_matrix$date),
+    "%Y-%m-%d"
+  ),
+  "| N =",
+  nrow(df_factor_matrix),
+  "\n"
+)
+
+cat(
+  "Vector factor sample:",
+  format(
+    min(df_factor_vector$date),
+    "%Y-%m-%d"
+  ),
+  "to",
+  format(
+    max(df_factor_vector$date),
+    "%Y-%m-%d"
+  ),
+  "| N =",
+  nrow(df_factor_vector),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.6 MERGE GDP AND FACTORS
+# ------------------------------------------------------------------------------
+
+df_matrix_fit <- df_gdp_growth %>%
+  dplyr::inner_join(
+    df_factor_matrix,
+    by = "date"
+  ) %>%
+  dplyr::arrange(date)
+
+df_vector_fit <- df_gdp_growth %>%
+  dplyr::inner_join(
+    df_factor_vector,
+    by = "date"
+  ) %>%
+  dplyr::arrange(date)
+
+
+# ------------------------------------------------------------------------------
+# 8.7 FUNCTION: IN-SAMPLE FACTOR FIT
+# ------------------------------------------------------------------------------
+
+estimate_factor_fit <- function(
+    data,
+    y_var,
+    model_name
+) {
+  
+  df <- data %>%
+    dplyr::select(
+      y = dplyr::all_of(y_var),
+      F_quarter,
+      M1,
+      M2,
+      M3
+    ) %>%
+    tidyr::drop_na()
+  
+  # ------------------------------------------------------------
+  # Specification 1:
+  # GDP growth on quarterly-average factor
+  # ------------------------------------------------------------
+  
+  fit_q <- stats::lm(
+    y ~ F_quarter,
+    data = df
+  )
+  
+  # ------------------------------------------------------------
+  # Specification 2:
+  # GDP growth on M1, M2, M3 separately
+  # ------------------------------------------------------------
+  
+  fit_m <- stats::lm(
+    y ~ M1 + M2 + M3,
+    data = df
+  )
+  
+  # With one regressor + intercept:
+  #
+  # R2 = Corr(y, F_quarter)^2
+  
+  corr_q <- stats::cor(
+    df$y,
+    df$F_quarter
+  )
+  
+  # With M1/M2/M3 jointly, sqrt(R2) is the multiple correlation:
+  #
+  # Corr(y, fitted(y))
+  
+  multiple_corr_m <- stats::cor(
+    df$y,
+    stats::fitted(fit_m)
+  )
+  
+  dplyr::bind_rows(
+    
+    data.frame(
+      dependent       = y_var,
+      model           = model_name,
+      specification   = "Quarterly average",
+      N               = stats::nobs(fit_q),
+      R2              = summary(fit_q)$r.squared,
+      Adj_R2          = summary(fit_q)$adj.r.squared,
+      Correlation     = corr_q,
+      Multiple_Corr   = abs(corr_q)
+    ),
+    
+    data.frame(
+      dependent       = y_var,
+      model           = model_name,
+      specification   = "M1 + M2 + M3",
+      N               = stats::nobs(fit_m),
+      R2              = summary(fit_m)$r.squared,
+      Adj_R2          = summary(fit_m)$adj.r.squared,
+      Correlation     = NA_real_,
+      Multiple_Corr   = multiple_corr_m
+    )
+  )
+}
+
+
+# ==============================================================================
+# 8.8 REPLICATION CHECK:
+# ORIGINAL QoQ EXERCISE
+# ==============================================================================
+
+fit_qoq_original <- dplyr::bind_rows(
+  
+  estimate_factor_fit(
+    data       = df_matrix_fit,
+    y_var      = "GDP_QoQ",
+    model_name = "Matrix MF-TPRF"
+  ),
+  
+  estimate_factor_fit(
+    data       = df_vector_fit,
+    y_var      = "GDP_QoQ",
+    model_name = "Vector MF-TPRF"
+  )
+)
+
+
+cat(
+  "\n",
+  paste(rep("=", 90), collapse = ""),
+  "\nORIGINAL IN-SAMPLE EXERCISE: QoQ GDP GROWTH | CORR SCREENING\n",
+  paste(rep("=", 90), collapse = ""),
+  "\n",
+  sep = ""
+)
+
+print(
+  fit_qoq_original %>%
+    dplyr::mutate(
+      R2_pct        = round(100 * R2, 1),
+      Adj_R2_pct    = round(100 * Adj_R2, 1),
+      Correlation   = round(Correlation, 3),
+      Multiple_Corr = round(Multiple_Corr, 3)
+    ) %>%
+    dplyr::select(
+      model,
+      specification,
+      N,
+      R2_pct,
+      Adj_R2_pct,
+      Correlation,
+      Multiple_Corr
+    )
+)
+
+
+# ==============================================================================
+# 8.9 BUILD ONE IDENTICAL COMMON SAMPLE
+# Matrix vs Vector AND QoQ vs YoY
+# ==============================================================================
+
+df_common_factor <- df_gdp_growth %>%
+  dplyr::inner_join(
+    df_factor_matrix %>%
+      dplyr::rename(
+        Matrix_M1 = M1,
+        Matrix_M2 = M2,
+        Matrix_M3 = M3,
+        Matrix_F  = F_quarter
+      ),
+    by = "date"
+  ) %>%
+  dplyr::inner_join(
+    df_factor_vector %>%
+      dplyr::rename(
+        Vector_M1 = M1,
+        Vector_M2 = M2,
+        Vector_M3 = M3,
+        Vector_F  = F_quarter
+      ),
+    by = "date"
+  ) %>%
+  dplyr::filter(
+    stats::complete.cases(
+      GDP_QoQ,
+      GDP_YoY,
+      Matrix_M1,
+      Matrix_M2,
+      Matrix_M3,
+      Matrix_F,
+      Vector_M1,
+      Vector_M2,
+      Vector_M3,
+      Vector_F
+    )
+  ) %>%
+  dplyr::arrange(date)
+
+
+cat(
+  "\nCommon QoQ--YoY / Matrix--Vector sample:",
+  format(
+    min(df_common_factor$date),
+    "%Y-%m-%d"
+  ),
+  "to",
+  format(
+    max(df_common_factor$date),
+    "%Y-%m-%d"
+  ),
+  "| N =",
+  nrow(df_common_factor),
+  "\n"
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.10 MODEL-SPECIFIC DATA ON THE COMMON SAMPLE
+# ------------------------------------------------------------------------------
+
+df_matrix_common <- df_common_factor %>%
+  dplyr::transmute(
+    date,
+    GDP_QoQ,
+    GDP_YoY,
+    M1        = Matrix_M1,
+    M2        = Matrix_M2,
+    M3        = Matrix_M3,
+    F_quarter = Matrix_F
+  )
+
+df_vector_common <- df_common_factor %>%
+  dplyr::transmute(
+    date,
+    GDP_QoQ,
+    GDP_YoY,
+    M1        = Vector_M1,
+    M2        = Vector_M2,
+    M3        = Vector_M3,
+    F_quarter = Vector_F
+  )
+
+
+# ==============================================================================
+# 8.11 QoQ vs YoY ON EXACTLY THE SAME SAMPLE
+# ==============================================================================
+
+factor_fit_comparison <- dplyr::bind_rows(
+  
+  # QoQ -- Matrix
+  estimate_factor_fit(
+    data       = df_matrix_common,
+    y_var      = "GDP_QoQ",
+    model_name = "Matrix MF-TPRF"
+  ),
+  
+  # QoQ -- Vector
+  estimate_factor_fit(
+    data       = df_vector_common,
+    y_var      = "GDP_QoQ",
+    model_name = "Vector MF-TPRF"
+  ),
+  
+  # YoY -- Matrix
+  estimate_factor_fit(
+    data       = df_matrix_common,
+    y_var      = "GDP_YoY",
+    model_name = "Matrix MF-TPRF"
+  ),
+  
+  # YoY -- Vector
+  estimate_factor_fit(
+    data       = df_vector_common,
+    y_var      = "GDP_YoY",
+    model_name = "Vector MF-TPRF"
+  )
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.12 FINAL TABLE
+# ------------------------------------------------------------------------------
+
+factor_fit_table <- factor_fit_comparison %>%
+  dplyr::mutate(
+    
+    # Explicit namespace avoids car::recode vs dplyr::recode conflict
+    Growth = dplyr::recode(
+      dependent,
+      GDP_QoQ = "QoQ",
+      GDP_YoY = "YoY"
+    ),
+    
+    R2_pct        = 100 * R2,
+    Adj_R2_pct    = 100 * Adj_R2,
+    Abs_Corr      = abs(Correlation)
+    
+  ) %>%
+  dplyr::select(
+    Growth,
+    model,
+    specification,
+    N,
+    R2_pct,
+    Adj_R2_pct,
+    Correlation,
+    Abs_Corr,
+    Multiple_Corr
+  )
+
+
+cat(
+  "\n",
+  paste(rep("=", 90), collapse = ""),
+  "\nIN-SAMPLE FACTOR INTERPRETATION: QoQ vs YoY GDP GROWTH\n",
+  paste(rep("=", 90), collapse = ""),
+  "\n",
+  sep = ""
+)
+
+print(
+  factor_fit_table %>%
+    dplyr::mutate(
+      R2_pct        = round(R2_pct, 1),
+      Adj_R2_pct    = round(Adj_R2_pct, 1),
+      Correlation   = round(Correlation, 3),
+      Abs_Corr      = round(Abs_Corr, 3),
+      Multiple_Corr = round(Multiple_Corr, 3)
+    )
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.13 COMPACT R2 TABLE
+# ------------------------------------------------------------------------------
+
+factor_r2_compact <- factor_fit_table %>%
+  dplyr::select(
+    Growth,
+    model,
+    specification,
+    R2_pct
+  ) %>%
+  dplyr::mutate(
+    R2_pct = round(R2_pct, 1)
+  ) %>%
+  tidyr::pivot_wider(
+    names_from  = model,
+    values_from = R2_pct
+  ) %>%
+  dplyr::arrange(
+    factor(
+      Growth,
+      levels = c("QoQ", "YoY")
+    ),
+    factor(
+      specification,
+      levels = c(
+        "Quarterly average",
+        "M1 + M2 + M3"
+      )
+    )
+  )
+
+
+cat(
+  "\n",
+  paste(rep("-", 70), collapse = ""),
+  "\nCOMPACT R2 COMPARISON (%)\n",
+  paste(rep("-", 70), collapse = ""),
+  "\n",
+  sep = ""
+)
+
+print(
+  factor_r2_compact
+)
+
+
+# ------------------------------------------------------------------------------
+# 8.14 SAVE RESULTS
+# ------------------------------------------------------------------------------
+
+utils::write.csv(
+  factor_fit_table,
+  file.path(
+    path_ea_nowcast_plots,
+    paste0(
+      "EA_factor_interpretation_QoQ_vs_YoY_sel-",
+      sel_factor,
+      ".csv"
+    )
+  ),
+  row.names = FALSE
+)
+
+saveRDS(
+  list(
+    selection         = sel_factor,
+    gdp_growth        = df_gdp_growth,
+    matrix_factors    = df_factor_matrix,
+    vector_factors    = df_factor_vector,
+    original_qoq      = fit_qoq_original,
+    common_sample     = df_common_factor,
+    fit_comparison    = factor_fit_comparison,
+    summary_table     = factor_fit_table,
+    compact_r2_table  = factor_r2_compact
+  ),
+  file.path(
+    path_ea_nowcast_plots,
+    paste0(
+      "EA_factor_interpretation_QoQ_vs_YoY_sel-",
+      sel_factor,
+      ".rds"
+    )
+  )
+)
+
+# ==============================================================================
+# 8.15 FIGURE: R2 COMPARISON
+# QoQ vs YoY | Matrix vs Vector
+# ==============================================================================
+
+df_r2_plot <- factor_fit_table %>%
+  dplyr::mutate(
+    Growth = factor(
+      Growth,
+      levels = c("QoQ", "YoY")
+    ),
+    specification = factor(
+      specification,
+      levels = c(
+        "Quarterly average",
+        "M1 + M2 + M3"
+      )
+    ),
+    model = factor(
+      model,
+      levels = c(
+        "Matrix MF-TPRF",
+        "Vector MF-TPRF"
+      )
+    )
+  )
+
+p_factor_r2 <- ggplot(
+  df_r2_plot,
+  aes(
+    x = Growth,
+    y = R2_pct,
+    fill = model
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.72),
+    width = 0.64
+  ) +
+  geom_text(
+    aes(
+      label = sprintf("%.1f", R2_pct)
+    ),
+    position = position_dodge(width = 0.72),
+    vjust = -0.35,
+    size = 3.6
+  ) +
+  facet_wrap(
+    ~ specification,
+    nrow = 1
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Matrix MF-TPRF" = "#228B22",
+      "Vector MF-TPRF" = "#1F77B4"
+    ),
+    name = NULL
+  ) +
+  scale_y_continuous(
+    limits = c(
+      0,
+      max(df_r2_plot$R2_pct, na.rm = TRUE) * 1.12
+    ),
+    labels = function(x) paste0(x, "%"),
+    expand = expansion(
+      mult = c(0, 0)
+    )
+  ) +
+  labs(
+    title = "In-sample EA GDP fit",
+    subtitle = paste0(
+      "Small information set — ",
+      ifelse(
+        sel_factor == "corr",
+        "Correlation screening",
+        "LASSO screening"
+      )
+    ),
+    x = NULL,
+    y = expression(R^2)
+  ) +
+  theme_country_compare(
+    base_size = 13
+  ) +
+  theme(
+    legend.position = "bottom"
+  )
+
+print(p_factor_r2)
+
+file_factor_r2 <- file.path(
+  path_ea_nowcast_plots,
+  paste0(
+    "plot_EA_factor_R2_QoQ_vs_YoY_sel-",
+    sel_factor,
+    ".png"
+  )
+)
+
+ggsave(
+  filename = file_factor_r2,
+  plot = p_factor_r2,
+  width = 9.2,
+  height = 4.8,
+  dpi = 500,
+  bg = "white"
+)
+
+# ==============================================================================
+# 8.16 FIGURE: YoY GDP AND ESTIMATED FACTORS
+# ==============================================================================
+
+sign_matrix <- sign(
+  cor(
+    df_common_factor$GDP_YoY,
+    df_common_factor$Matrix_F,
+    use = "complete.obs"
+  )
+)
+
+sign_vector <- sign(
+  cor(
+    df_common_factor$GDP_YoY,
+    df_common_factor$Vector_F,
+    use = "complete.obs"
+  )
+)
+
+df_factor_yoy_plot <- df_common_factor %>%
+  dplyr::transmute(
+    date,
+    
+    `EA GDP YoY` =
+      as.numeric(scale(GDP_YoY)),
+    
+    `Matrix MF-TPRF` =
+      as.numeric(
+        scale(sign_matrix * Matrix_F)
+      ),
+    
+    `Vector MF-TPRF` =
+      as.numeric(
+        scale(sign_vector * Vector_F)
+      )
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -date,
+    names_to = "series",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    series = factor(
+      series,
+      levels = c(
+        "EA GDP YoY",
+        "Matrix MF-TPRF",
+        "Vector MF-TPRF"
+      )
+    )
+  )
+
+p_factor_yoy <- ggplot(
+  df_factor_yoy_plot,
+  aes(
+    x = date,
+    y = value,
+    colour = series,
+    linetype = series
+  )
+) +
+  geom_hline(
+    yintercept = 0,
+    linewidth = 0.35,
+    colour = "grey60"
+  ) +
+  geom_line(
+    linewidth = 0.95
+  ) +
+  scale_colour_manual(
+    values = c(
+      "EA GDP YoY"     = "#C00000",
+      "Matrix MF-TPRF" = "#228B22",
+      "Vector MF-TPRF" = "#1F77B4"
+    ),
+    name = NULL
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "EA GDP YoY"     = "solid",
+      "Matrix MF-TPRF" = "solid",
+      "Vector MF-TPRF" = "33"
+    ),
+    name = NULL
+  ) +
+  scale_x_date(
+    date_breaks = "3 years",
+    date_labels = "%Y",
+    expand = expansion(
+      mult = c(0.01, 0.02)
+    )
+  ) +
+  labs(
+    title = "EA year-on-year GDP growth and estimated factors",
+    subtitle = paste0(
+      "Standardised series — ",
+      ifelse(
+        sel_factor == "corr",
+        "Correlation screening",
+        "LASSO screening"
+      )
+    ),
+    x = NULL,
+    y = "Standardised units"
+  ) +
+  theme_country_compare(
+    base_size = 13
+  ) +
+  theme(
+    legend.position = "bottom"
+  )
+
+print(p_factor_yoy)
+
+file_factor_yoy <- file.path(
+  path_ea_nowcast_plots,
+  paste0(
+    "plot_EA_factor_vs_YoY_GDP_sel-",
+    sel_factor,
+    ".png"
+  )
+)
+
+ggsave(
+  filename = file_factor_yoy,
+  plot = p_factor_yoy,
+  width = 11.5,
+  height = 5.0,
+  dpi = 500,
+  bg = "white"
+)
+
+
+# ==============================================================================
+# 5.1 SINGLE-VINTAGE EA NOWCAST PLOTS
+# Full sample + Pre-COVID / COVID / Post-COVID
+#
+# For each screening rule:
+#   LASSO / corr
+#
+# and for each vintage:
+#   M1 / M2 / M3
+#
+# save:
+#   1. full-sample single-vintage figure
+#   2. three-panel regime figure
+# ==============================================================================
+
+path_ea_regime_split <- file.path(
+  path_ea_nowcast_plots,
+  "regime_split"
+)
+
+dir.create(
+  path_ea_regime_split,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+ea_vintage_regime_plots <- list()
+ea_vintage_regime_files <- list()
+
+
+# ------------------------------------------------------------------------------
+# Display labels
+# ------------------------------------------------------------------------------
+
+ea_regime_series_levels <- c(
+  "Observed EA GDP",
+  "Matrix MF-TPRF",
+  "EA-vector MF-TPRF"
+)
+
+ea_regime_colors <- c(
+  "Observed EA GDP"      = "#C00000",
+  "Matrix MF-TPRF"       = "#228B22",
+  "EA-vector MF-TPRF"    = "#1F77B4"
+)
+
+ea_regime_linetypes <- c(
+  "Observed EA GDP"      = "solid",
+  "Matrix MF-TPRF"       = "solid",
+  "EA-vector MF-TPRF"    = "33"
+)
+
+
+# ==============================================================================
+# LOOP OVER SCREENING RULE AND VINTAGE
+# ==============================================================================
+
+for (sel_i in ea_selection_grid) {
+  
+  selection_label <- if (
+    identical(
+      sel_i,
+      "corr"
+    )
+  ) {
+    "Correlation screening"
+  } else {
+    "LASSO screening"
+  }
+  
+  
+  # ---------------------------------------------------------------------------
+  # Use already aligned plot data from Section 4.
+  #
+  # Only the display name VEC-C -> EA-vector MF-TPRF is changed here.
+  # ---------------------------------------------------------------------------
+  
+  df_plot_selection <- ea_nowcast_comparison[[sel_i]]$plot_data %>%
+    dplyr::mutate(
+      series = dplyr::recode(
+        as.character(series),
+        "VEC-C" = "EA-vector MF-TPRF"
+      )
+    )
+  
+  
+  ea_vintage_regime_plots[[sel_i]] <- list()
+  ea_vintage_regime_files[[sel_i]] <- list()
+  
+  
+  for (vintage_i in ea_month_order) {
+    
+    # -------------------------------------------------------------------------
+    # OUTPUT DIRECTORY
+    #
+    # EA_nowcast_comparison/
+    #   regime_split/
+    #     LASSO/
+    #       M1/
+    #       M2/
+    #       M3/
+    #     corr/
+    #       M1/
+    #       M2/
+    #       M3/
+    # -------------------------------------------------------------------------
+    
+    path_vintage <- file.path(
+      path_ea_regime_split,
+      sel_i,
+      vintage_i
+    )
+    
+    dir.create(
+      path_vintage,
+      recursive = TRUE,
+      showWarnings = FALSE
+    )
+    
+    
+    # -------------------------------------------------------------------------
+    # BUILD PLOTS
+    # -------------------------------------------------------------------------
+    
+    plot_out <- make_nowcast_regime_plots(
+      df_plot          = df_plot_selection,
+      vintage          = vintage_i,
+      params           = params_plot,
+      observed_series  = "Observed EA GDP",
+      series_levels    = ea_regime_series_levels,
+      series_colors    = ea_regime_colors,
+      series_linetypes = ea_regime_linetypes,
+      title_prefix     = "Expanding pseudo-real-time EA nowcasts",
+      subtitle         = paste0(
+        "Small information set — ",
+        selection_label
+      ),
+      y_label          = "EA GDP growth",
+      pad_frac         = gdp_axis_pad_frac,
+      min_pad          = gdp_axis_min_pad
+    )
+    
+    
+    # -------------------------------------------------------------------------
+    # FILE NAMES
+    # -------------------------------------------------------------------------
+    
+    file_full <- file.path(
+      path_vintage,
+      paste0(
+        "plot_EA_",
+        vintage_i,
+        "_full_sample",
+        "_proxy-",
+        proxy_mode,
+        "_Size-",
+        size_ea,
+        "_sel-",
+        sel_i,
+        ".png"
+      )
+    )
+    
+    file_regimes <- file.path(
+      path_vintage,
+      paste0(
+        "plot_EA_",
+        vintage_i,
+        "_regimes",
+        "_proxy-",
+        proxy_mode,
+        "_Size-",
+        size_ea,
+        "_sel-",
+        sel_i,
+        ".png"
+      )
+    )
+    
+    
+    # -------------------------------------------------------------------------
+    # SAVE FULL SAMPLE
+    # -------------------------------------------------------------------------
+    
+    ggplot2::ggsave(
+      filename = file_full,
+      plot     = plot_out$full_sample,
+      width    = 10.8,
+      height   = 5.0,
+      dpi      = 500,
+      bg       = "white"
+    )
+    
+    
+    # -------------------------------------------------------------------------
+    # SAVE THREE-PANEL REGIME FIGURE
+    # -------------------------------------------------------------------------
+    
+    ggplot2::ggsave(
+      filename = file_regimes,
+      plot     = plot_out$regimes,
+      width    = 13.2,
+      height   = 4.9,
+      dpi      = 500,
+      bg       = "white"
+    )
+    
+    
+    # -------------------------------------------------------------------------
+    # PRINT TO DEVICE
+    # -------------------------------------------------------------------------
+    
+    print(
+      plot_out$full_sample
+    )
+    
+    print(
+      plot_out$regimes
+    )
+    
+    
+    # -------------------------------------------------------------------------
+    # STORE
+    # -------------------------------------------------------------------------
+    
+    ea_vintage_regime_plots[[sel_i]][[vintage_i]] <- plot_out
+    
+    ea_vintage_regime_files[[sel_i]][[vintage_i]] <- list(
+      full_sample = file_full,
+      regimes     = file_regimes
+    )
+    
+    
+    cat(
+      "\nSaved EA ",
+      vintage_i,
+      " plots | ",
+      sel_i,
+      "\n  Full sample: ",
+      file_full,
+      "\n  Regimes:     ",
+      file_regimes,
+      "\n",
+      sep = ""
+    )
+  }
+}
+

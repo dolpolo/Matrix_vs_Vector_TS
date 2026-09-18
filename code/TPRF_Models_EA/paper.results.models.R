@@ -941,36 +941,113 @@ country_labels <- c(
 )
 
 # ------------------------------------------------------------------------------
-# 8.1 Single-country plots: automatically for all countries
+# 8.1 Single-country plots: full sample + vintage/regime figures
 # ------------------------------------------------------------------------------
 
-path_single_country_plots <- file.path(path_final_results, "country_model_plots")
-dir.create(path_single_country_plots, recursive = TRUE, showWarnings = FALSE)
+path_single_country_plots <- file.path(
+  path_final_results,
+  "country_model_plots"
+)
 
+dir.create(
+  path_single_country_plots,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Root folder for the new regime-split figures
+path_country_regime_split <- file.path(
+  path_single_country_plots,
+  "regime_split"
+)
+
+dir.create(
+  path_country_regime_split,
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+# Existing outputs
 plot_single_models_by_country <- list()
-file_single_png_by_country <- list()
+file_single_png_by_country    <- list()
 
+# New outputs
+country_vintage_regime_plots <- list()
+country_vintage_regime_files <- list()
+
+
+# ==============================================================================
+# COUNTRY LOOP
+# ==============================================================================
 
 for (country_focus in country_order) {
   
-  country_focus_label <- unname(country_labels[country_focus])
-  if (is.na(country_focus_label)) country_focus_label <- country_focus
+  country_focus_label <- unname(
+    country_labels[country_focus]
+  )
+  
+  if (is.na(country_focus_label)) {
+    country_focus_label <- country_focus
+  }
+  
+  
+  # ============================================================================
+  # 1. EXTRACT MODEL NOWCASTS
+  # ============================================================================
   
   df_single_all <- dplyr::bind_rows(
-    extract_country_rt(summary_matrix$df_rt_all,    country_focus, label_matrix),
-    extract_country_rt(summary_vectensor$df_rt_all, country_focus, label_vecp),
-    extract_country_rt(summary_vector$df_rt_all,    country_focus, label_vecc),
-    extract_country_rt(summary_dfm$df_rt_all,       country_focus, label_dfm)
+    
+    extract_country_rt(
+      summary_matrix$df_rt_all,
+      country_focus,
+      label_matrix
+    ),
+    
+    extract_country_rt(
+      summary_vectensor$df_rt_all,
+      country_focus,
+      label_vecp
+    ),
+    
+    extract_country_rt(
+      summary_vector$df_rt_all,
+      country_focus,
+      label_vecc
+    ),
+    
+    extract_country_rt(
+      summary_dfm$df_rt_all,
+      country_focus,
+      label_dfm
+    )
+    
   ) %>%
     dplyr::mutate(
-      model = factor(model, levels = model_levels),
-      type  = factor(type, levels = month_order)
+      model = factor(
+        model,
+        levels = model_levels
+      ),
+      type = factor(
+        type,
+        levels = month_order
+      )
     )
   
+  
   if (nrow(df_single_all) == 0L) {
-    cat("\nSkipping country plot:", country_focus, "- no RT data.\n")
+    cat(
+      "\nSkipping country plot: ",
+      country_focus,
+      " - no RT data.\n",
+      sep = ""
+    )
     next
   }
+  
+  
+  # ============================================================================
+  # 2. OBSERVED GDP
+  # ============================================================================
   
   df_single_gdp <- extract_country_gdp(
     summary_matrix$df_yq_eval_all,
@@ -979,12 +1056,23 @@ for (country_focus in country_order) {
   
   df_single_gdp_facet <- tidyr::crossing(
     df_single_gdp,
-    type = factor(month_order, levels = month_order)
+    type = factor(
+      month_order,
+      levels = month_order
+    )
   )
   
-  ylim_single <- get_gdp_ylim(df_single_gdp)
+  
+  # ============================================================================
+  # 3. EXISTING FULL-SAMPLE M1 / M2 / M3 FIGURE
+  # ============================================================================
+  
+  ylim_single <- get_gdp_ylim(
+    df_single_gdp
+  )
   
   p_single <- ggplot() +
+    
     annotate(
       "rect",
       xmin = params$covid_start,
@@ -994,47 +1082,100 @@ for (country_focus in country_order) {
       fill = "grey72",
       alpha = 0.11
     ) +
+    
     geom_line(
       data = df_single_gdp_facet,
-      aes(x = date, y = GDP, group = type),
+      aes(
+        x = date,
+        y = GDP,
+        group = type
+      ),
       colour = "black",
       linewidth = 1.25,
       linetype = "solid",
       lineend = "round"
     ) +
+    
     geom_line(
       data = df_single_all,
-      aes(x = date, y = nowcast, colour = model, linetype = model),
+      aes(
+        x = date,
+        y = nowcast,
+        colour = model,
+        linetype = model
+      ),
       linewidth = 1.00,
       alpha = 0.98,
       lineend = "round"
     ) +
-    facet_wrap(~ type, ncol = 3) +
-    scale_color_manual(values = model_colors, breaks = model_levels, name = NULL) +
-    scale_linetype_manual(values = model_linetypes, breaks = model_levels, name = NULL) +
+    
+    facet_wrap(
+      ~ type,
+      ncol = 3
+    ) +
+    
+    scale_color_manual(
+      values = model_colors,
+      breaks = model_levels,
+      name = NULL
+    ) +
+    
+    scale_linetype_manual(
+      values = model_linetypes,
+      breaks = model_levels,
+      name = NULL
+    ) +
+    
     scale_x_date(
       breaks = seq(
-        floor_date(min(df_single_all$date, na.rm = TRUE), unit = "year"),
-        floor_date(max(df_single_all$date, na.rm = TRUE), unit = "year"),
+        floor_date(
+          min(df_single_all$date, na.rm = TRUE),
+          unit = "year"
+        ),
+        floor_date(
+          max(df_single_all$date, na.rm = TRUE),
+          unit = "year"
+        ),
         by = "2 years"
       ),
       date_labels = "%Y",
-      expand = expansion(mult = c(0.01, 0.02))
+      expand = expansion(
+        mult = c(0.01, 0.02)
+      )
     ) +
+    
     labs(
-      title = paste0("Expanding pseudo-real-time nowcasts for ", country_focus_label),
+      title = paste0(
+        "Expanding pseudo-real-time nowcasts for ",
+        country_focus_label
+      ),
       x = NULL,
       y = "GDP growth"
     ) +
-    theme_country_compare(base_size = 13) +
-    coord_cartesian(ylim = ylim_single)
+    
+    theme_country_compare(
+      base_size = 13
+    ) +
+    
+    coord_cartesian(
+      ylim = ylim_single
+    )
+  
   
   print(p_single)
   
+  
   file_single_png <- file.path(
     path_single_country_plots,
-    paste0("plot_", country_focus, "_models_by_month_paper_", suffix_out, ".png")
+    paste0(
+      "plot_",
+      country_focus,
+      "_models_by_month_paper_",
+      suffix_out,
+      ".png"
+    )
   )
+  
   
   ggsave(
     filename = file_single_png,
@@ -1045,8 +1186,264 @@ for (country_focus in country_order) {
     bg       = "white"
   )
   
+  
   plot_single_models_by_country[[country_focus]] <- p_single
-  file_single_png_by_country[[country_focus]] <- file_single_png
+  file_single_png_by_country[[country_focus]]    <- file_single_png
+  
+  
+  # ============================================================================
+  # 4. DATASET REQUIRED BY make_nowcast_regime_plots()
+  #
+  # Structure:
+  # date | type | value | series
+  # ============================================================================
+  
+  df_country_plot <- dplyr::bind_rows(
+    
+    # Observed GDP, replicated for M1 / M2 / M3
+    df_single_gdp_facet %>%
+      dplyr::transmute(
+        date,
+        type,
+        value  = GDP,
+        series = "Observed GDP"
+      ),
+    
+    # Model nowcasts
+    df_single_all %>%
+      dplyr::transmute(
+        date,
+        type,
+        value  = nowcast,
+        series = as.character(model)
+      )
+    
+  ) %>%
+    dplyr::mutate(
+      
+      type = factor(
+        type,
+        levels = month_order
+      ),
+      
+      series = factor(
+        series,
+        levels = c(
+          "Observed GDP",
+          label_matrix,
+          label_vecp,
+          label_vecc,
+          label_dfm
+        )
+      )
+      
+    ) %>%
+    dplyr::arrange(
+      type,
+      series,
+      date
+    )
+  
+  
+  # ============================================================================
+  # 5. SERIES SETTINGS
+  # ============================================================================
+  
+  country_regime_series_levels <- c(
+    "Observed GDP",
+    label_matrix,
+    label_vecp,
+    label_vecc,
+    label_dfm
+  )
+  
+  country_regime_colors <- c(
+    "Observed GDP"   = "black",
+    "Matrix MF-TPRF" = "#1b6ca8",
+    "VEC-P"          = "#55a868",
+    "VEC-C"          = "#c44e52",
+    "DFM"            = "grey35"
+  )
+  
+  country_regime_linetypes <- c(
+    "Observed GDP"   = "solid",
+    "Matrix MF-TPRF" = "solid",
+    "VEC-P"          = "11",
+    "VEC-C"          = "33",
+    "DFM"            = "44"
+  )
+  
+  
+  # Initialise country-specific storage
+  country_vintage_regime_plots[[country_focus]] <- list()
+  country_vintage_regime_files[[country_focus]] <- list()
+  
+  
+  # ============================================================================
+  # 6. LOOP OVER M1 / M2 / M3
+  # ============================================================================
+  
+  for (vintage_i in month_order) {
+    
+    # --------------------------------------------------------------------------
+    # Folder structure:
+    #
+    # country_model_plots/
+    #   regime_split/
+    #     DE/
+    #       M1/
+    #       M2/
+    #       M3/
+    # --------------------------------------------------------------------------
+    
+    path_country_vintage <- file.path(
+      path_country_regime_split,
+      country_focus,
+      vintage_i
+    )
+    
+    dir.create(
+      path_country_vintage,
+      recursive = TRUE,
+      showWarnings = FALSE
+    )
+    
+    
+    # --------------------------------------------------------------------------
+    # Build figures
+    # --------------------------------------------------------------------------
+    
+    plot_out <- make_nowcast_regime_plots(
+      
+      df_plot = df_country_plot,
+      
+      vintage = vintage_i,
+      
+      params = params,
+      
+      observed_series = "Observed GDP",
+      
+      series_levels = country_regime_series_levels,
+      
+      series_colors = country_regime_colors,
+      
+      series_linetypes = country_regime_linetypes,
+      
+      title_prefix = paste0(
+        "Expanding pseudo-real-time nowcasts for ",
+        country_focus_label
+      ),
+      
+      subtitle = paste0(
+        "Size = ",
+        Size,
+        " — ",
+        ifelse(
+          sel == "corr",
+          "Correlation screening",
+          "LASSO screening"
+        )
+      ),
+      
+      y_label = "GDP growth",
+      
+      pad_frac = 0.15,
+      
+      min_pad = 0.05
+    )
+    
+    
+    # ==========================================================================
+    # 7. FILE NAMES
+    # ==========================================================================
+    
+    file_country_full <- file.path(
+      path_country_vintage,
+      paste0(
+        "plot_",
+        country_focus,
+        "_",
+        vintage_i,
+        "_full_sample_",
+        suffix_out,
+        ".png"
+      )
+    )
+    
+    
+    file_country_regimes <- file.path(
+      path_country_vintage,
+      paste0(
+        "plot_",
+        country_focus,
+        "_",
+        vintage_i,
+        "_regimes_",
+        suffix_out,
+        ".png"
+      )
+    )
+    
+    
+    # ==========================================================================
+    # 8. SAVE FIGURES
+    # ==========================================================================
+    
+    ggsave(
+      filename = file_country_full,
+      plot     = plot_out$full_sample,
+      width    = 10.8,
+      height   = 5.0,
+      dpi      = 500,
+      bg       = "white"
+    )
+    
+    
+    ggsave(
+      filename = file_country_regimes,
+      plot     = plot_out$regimes,
+      width    = 13.2,
+      height   = 4.9,
+      dpi      = 500,
+      bg       = "white"
+    )
+    
+    
+    print(
+      plot_out$full_sample
+    )
+    
+    print(
+      plot_out$regimes
+    )
+    
+    
+    # ==========================================================================
+    # 9. STORE
+    # ==========================================================================
+    
+    country_vintage_regime_plots[[country_focus]][[vintage_i]] <- plot_out
+    
+    country_vintage_regime_files[[country_focus]][[vintage_i]] <- list(
+      full_sample = file_country_full,
+      regimes     = file_country_regimes
+    )
+    
+    
+    cat(
+      "\nSaved ",
+      country_focus,
+      " ",
+      vintage_i,
+      " figures",
+      "\n  Full sample: ",
+      file_country_full,
+      "\n  Regimes:     ",
+      file_country_regimes,
+      "\n",
+      sep = ""
+    )
+  }
 }
 # ------------------------------------------------------------------------------
 # 8.2 Multi-country plots: Big 4 and other 4 automatically

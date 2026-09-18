@@ -53,13 +53,13 @@ source(file.path(path_func, "matrix.mf.tprf.utils.R"))
 # ==============================================================================
 
 proxy_mode <- "scalar"   # "scalar" | "multivariate"
-Size       <- "small"    # "small" | "medium" | "large"
-sel        <- "LASSO"    # "corr" | "LASSO"
+Size       <- "small"     # "small" | "medium" | "large" | "full"
+sel        <- "LASSO"     # "corr" | "LASSO" | "none"
 
 model_name <- paste0("matrix_", proxy_mode)
 
-# Old fixed-rank appendix result already available on disk.
-model_name_fixed <- "matrix"
+# Fixed-rank appendix
+model_name_fixed <- model_name
 
 run_id <- paste(proxy_mode, Size, sel, sep = "_")
 
@@ -162,10 +162,9 @@ file_rt <- find_result_file(
   sel   = sel
 )
 
-# Fixed-rank appendix remains the pre-existing benchmark.
 file_fit_fixed <- find_result_file(
   path  = path_results,
-  model_name_fixed <- model_name,
+  model = model_name_fixed,
   stage = "fit_fixed",
   Size  = Size,
   sel   = sel

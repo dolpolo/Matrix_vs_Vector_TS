@@ -9596,3 +9596,522 @@ make_latex_ea_rmsfe_table <- function(
     "\\end{table}\n"
   )
 }
+
+# ==============================================================================
+# NOWCAST PLOTS BY VINTAGE AND EVALUATION REGIME
+# ==============================================================================
+
+make_nowcast_regime_plots <- function(
+    df_plot,
+    vintage,
+    params,
+    observed_series,
+    series_levels,
+    series_colors,
+    series_linetypes,
+    title_prefix,
+    subtitle = NULL,
+    y_label = "GDP growth",
+    pad_frac = 0.15,
+    min_pad = 0.05
+) {
+  
+  # ---------------------------------------------------------------------------
+  # 0. CHECKS
+  # ---------------------------------------------------------------------------
+  
+  required_cols <- c(
+    "date",
+    "type",
+    "value",
+    "series"
+  )
+  
+  missing_cols <- setdiff(
+    required_cols,
+    names(df_plot)
+  )
+  
+  if (length(missing_cols) > 0L) {
+    stop(
+      "df_plot is missing columns: ",
+      paste(missing_cols, collapse = ", ")
+    )
+  }
+  
+  required_params <- c(
+    "start_eval",
+    "end_eval",
+    "covid_start",
+    "covid_end"
+  )
+  
+  missing_params <- setdiff(
+    required_params,
+    names(params)
+  )
+  
+  if (length(missing_params) > 0L) {
+    stop(
+      "params is missing entries: ",
+      paste(missing_params, collapse = ", ")
+    )
+  }
+  
+  if (!vintage %in% c("M1", "M2", "M3")) {
+    stop("vintage must be one of M1, M2, M3.")
+  }
+  
+  
+  # ---------------------------------------------------------------------------
+  # 1. KEEP ONE VINTAGE
+  # ---------------------------------------------------------------------------
+  
+  df_vintage <- df_plot %>%
+    dplyr::mutate(
+      date   = as.Date(date),
+      type   = as.character(type),
+      series = as.character(series)
+    ) %>%
+    dplyr::filter(
+      type == vintage,
+      date >= as.Date(params$start_eval),
+      date <= as.Date(params$end_eval)
+    ) %>%
+    dplyr::mutate(
+      series = factor(
+        series,
+        levels = series_levels
+      )
+    ) %>%
+    dplyr::arrange(
+      date,
+      series
+    )
+  
+  if (nrow(df_vintage) == 0L) {
+    stop(
+      "No observations available for vintage ",
+      vintage,
+      "."
+    )
+  }
+  
+  if (!observed_series %in% as.character(df_vintage$series)) {
+    stop(
+      "Observed series '",
+      observed_series,
+      "' not found."
+    )
+  }
+  
+  
+  # ---------------------------------------------------------------------------
+  # 2. SMALL INTERNAL HELPER FOR GDP-BASED Y LIMITS
+  # ---------------------------------------------------------------------------
+  
+  get_limits <- function(x) {
+    
+    x <- x[is.finite(x)]
+    
+    if (length(x) == 0L) {
+      return(c(NA_real_, NA_real_))
+    }
+    
+    y_min <- min(x)
+    y_max <- max(x)
+    
+    span <- y_max - y_min
+    
+    pad <- max(
+      pad_frac * span,
+      min_pad
+    )
+    
+    c(
+      y_min - pad,
+      y_max + pad
+    )
+  }
+  
+  
+  # ===========================================================================
+  # 3. FULL-SAMPLE FIGURE FOR ONE VINTAGE
+  # ===========================================================================
+  
+  gdp_full <- df_vintage %>%
+    dplyr::filter(
+      as.character(series) == observed_series
+    )
+  
+  ylim_full <- get_limits(
+    gdp_full$value
+  )
+  
+  df_full <- df_vintage %>%
+    dplyr::mutate(
+      value_plot = pmin(
+        pmax(
+          value,
+          ylim_full[1]
+        ),
+        ylim_full[2]
+      )
+    )
+  
+  p_full <- ggplot2::ggplot(
+    df_full,
+    ggplot2::aes(
+      x        = date,
+      y        = value_plot,
+      colour   = series,
+      linetype = series,
+      group    = series
+    )
+  ) +
+    ggplot2::annotate(
+      "rect",
+      xmin  = as.Date(params$covid_start),
+      xmax  = as.Date(params$covid_end),
+      ymin  = -Inf,
+      ymax  = Inf,
+      fill  = "grey72",
+      alpha = 0.11
+    ) +
+    ggplot2::geom_hline(
+      yintercept = 0,
+      linewidth  = 0.35,
+      colour     = "grey55"
+    ) +
+    ggplot2::geom_line(
+      linewidth = 1.00,
+      alpha     = 0.98,
+      lineend   = "round"
+    ) +
+    ggplot2::scale_colour_manual(
+      values = series_colors,
+      breaks = series_levels,
+      name   = NULL
+    ) +
+    ggplot2::scale_linetype_manual(
+      values = series_linetypes,
+      breaks = series_levels,
+      name   = NULL
+    ) +
+    ggplot2::scale_x_date(
+      date_breaks = "2 years",
+      date_labels = "%Y",
+      expand = ggplot2::expansion(
+        mult = c(0.01, 0.02)
+      )
+    ) +
+    ggplot2::scale_y_continuous(
+      limits = ylim_full,
+      oob    = scales::squish,
+      breaks = scales::pretty_breaks(
+        n = 6
+      ),
+      expand = ggplot2::expansion(
+        mult = c(0, 0)
+      )
+    ) +
+    ggplot2::coord_cartesian(
+      expand = FALSE,
+      clip   = "on"
+    ) +
+    ggplot2::labs(
+      title = paste0(
+        title_prefix,
+        ": ",
+        vintage
+      ),
+      subtitle = subtitle,
+      x = NULL,
+      y = y_label
+    ) +
+    theme_country_compare(
+      base_size = 13
+    ) +
+    ggplot2::theme(
+      legend.position = "bottom"
+    )
+  
+  
+  # ===========================================================================
+  # 4. ASSIGN PRE-COVID / COVID / POST-COVID
+  # ===========================================================================
+  
+  df_regime <- df_vintage %>%
+    dplyr::mutate(
+      regime = dplyr::case_when(
+        date < as.Date(params$covid_start) ~ "Pre-COVID",
+        date <= as.Date(params$covid_end)  ~ "COVID period",
+        TRUE                               ~ "Post-COVID"
+      ),
+      regime = factor(
+        regime,
+        levels = c(
+          "Pre-COVID",
+          "COVID period",
+          "Post-COVID"
+        )
+      )
+    )
+  
+  
+  # ---------------------------------------------------------------------------
+  # 4.1 PANEL-SPECIFIC Y LIMITS
+  #
+  # Limits are computed ONLY from realised GDP within each regime.
+  # Model nowcasts outside the range are squished at the panel boundary.
+  # ---------------------------------------------------------------------------
+  
+  axis_regime <- df_regime %>%
+    dplyr::filter(
+      as.character(series) == observed_series
+    ) %>%
+    dplyr::group_by(regime) %>%
+    dplyr::summarise(
+      date_min = min(date, na.rm = TRUE),
+      date_max = max(date, na.rm = TRUE),
+      gdp_min  = min(value, na.rm = TRUE),
+      gdp_max  = max(value, na.rm = TRUE),
+      .groups  = "drop"
+    ) %>%
+    dplyr::mutate(
+      gdp_span = gdp_max - gdp_min,
+      y_pad = pmax(
+        pad_frac * gdp_span,
+        min_pad
+      ),
+      y_min = gdp_min - y_pad,
+      y_max = gdp_max + y_pad
+    )
+  
+  if (nrow(axis_regime) != 3L) {
+    warning(
+      "Not all three evaluation regimes are represented for ",
+      vintage,
+      "."
+    )
+  }
+  
+  df_regime <- df_regime %>%
+    dplyr::left_join(
+      axis_regime %>%
+        dplyr::select(
+          regime,
+          y_min,
+          y_max
+        ),
+      by = "regime"
+    ) %>%
+    dplyr::mutate(
+      value_plot = pmin(
+        pmax(
+          value,
+          y_min
+        ),
+        y_max
+      )
+    )
+  
+  
+  # ---------------------------------------------------------------------------
+  # 4.2 ANCHORS FORCE EACH FACET TO USE ITS GDP-BASED RANGE
+  # ---------------------------------------------------------------------------
+  
+  axis_anchors <- dplyr::bind_rows(
+    
+    axis_regime %>%
+      dplyr::transmute(
+        regime,
+        date       = date_min,
+        value_plot = y_min
+      ),
+    
+    axis_regime %>%
+      dplyr::transmute(
+        regime,
+        date       = date_max,
+        value_plot = y_max
+      )
+  )
+  
+  
+  # ---------------------------------------------------------------------------
+  # 4.3 FACET LABELS
+  # ---------------------------------------------------------------------------
+  
+  pre_end <- seq(
+    from       = as.Date(params$covid_start),
+    by         = "-1 month",
+    length.out = 2
+  )[2]
+  
+  post_start <- seq(
+    from       = as.Date(params$covid_end),
+    by         = "1 month",
+    length.out = 2
+  )[2]
+  
+  regime_labels <- c(
+    
+    "Pre-COVID" = paste0(
+      "Pre-COVID\n",
+      format(
+        as.Date(params$start_eval),
+        "%b %Y"
+      ),
+      " -- ",
+      format(
+        pre_end,
+        "%b %Y"
+      )
+    ),
+    
+    "COVID period" = paste0(
+      "COVID\n",
+      format(
+        as.Date(params$covid_start),
+        "%b %Y"
+      ),
+      " -- ",
+      format(
+        as.Date(params$covid_end),
+        "%b %Y"
+      )
+    ),
+    
+    "Post-COVID" = paste0(
+      "Post-COVID\n",
+      format(
+        post_start,
+        "%b %Y"
+      ),
+      " -- ",
+      format(
+        as.Date(params$end_eval),
+        "%b %Y"
+      )
+    )
+  )
+  
+  
+  # ===========================================================================
+  # 5. THREE-PANEL REGIME FIGURE
+  # ===========================================================================
+  
+  p_regimes <- ggplot2::ggplot(
+    df_regime,
+    ggplot2::aes(
+      x        = date,
+      y        = value_plot,
+      colour   = series,
+      linetype = series,
+      group    = series
+    )
+  ) +
+    ggplot2::geom_blank(
+      data = axis_anchors,
+      ggplot2::aes(
+        x = date,
+        y = value_plot
+      ),
+      inherit.aes = FALSE
+    ) +
+    ggplot2::geom_hline(
+      yintercept = 0,
+      linewidth  = 0.35,
+      colour     = "grey55"
+    ) +
+    ggplot2::geom_line(
+      linewidth = 1.00,
+      alpha     = 0.98,
+      lineend   = "round"
+    ) +
+    ggplot2::facet_wrap(
+      ~ regime,
+      ncol   = 3,
+      scales = "free",
+      labeller = ggplot2::as_labeller(
+        regime_labels
+      )
+    ) +
+    ggplot2::scale_colour_manual(
+      values = series_colors,
+      breaks = series_levels,
+      name   = NULL
+    ) +
+    ggplot2::scale_linetype_manual(
+      values = series_linetypes,
+      breaks = series_levels,
+      name   = NULL
+    ) +
+    ggplot2::scale_x_date(
+      date_breaks = "1 year",
+      date_labels = "%Y",
+      expand = ggplot2::expansion(
+        mult = c(0.02, 0.03)
+      )
+    ) +
+    ggplot2::scale_y_continuous(
+      breaks = scales::pretty_breaks(
+        n = 5
+      ),
+      expand = ggplot2::expansion(
+        mult = c(0, 0)
+      )
+    ) +
+    ggplot2::coord_cartesian(
+      expand = FALSE,
+      clip   = "on"
+    ) +
+    ggplot2::labs(
+      title = paste0(
+        title_prefix,
+        ": ",
+        vintage,
+        " by evaluation regime"
+      ),
+      subtitle = paste0(
+        subtitle,
+        if (!is.null(subtitle)) {
+          " | "
+        } else {
+          ""
+        },
+        "Panel-specific y-scales based on realised GDP"
+      ),
+      x = NULL,
+      y = y_label
+    ) +
+    theme_country_compare(
+      base_size = 13
+    ) +
+    ggplot2::theme(
+      legend.position = "bottom",
+      strip.text = ggplot2::element_text(
+        face = "bold"
+      ),
+      axis.text.x = ggplot2::element_text(
+        angle = 0,
+        hjust = 0.5
+      )
+    )
+  
+  
+  # ===========================================================================
+  # 6. RETURN
+  # ===========================================================================
+  
+  list(
+    vintage       = vintage,
+    full_sample   = p_full,
+    regimes       = p_regimes,
+    data_full     = df_full,
+    data_regimes  = df_regime,
+    ylim_full     = ylim_full,
+    ylim_regimes  = axis_regime
+  )
+}

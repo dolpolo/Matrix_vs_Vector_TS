@@ -207,13 +207,19 @@ select_vars <- function(countries, params, path_raw, path_adj,
   for (cc in countries) {
     
     # ---- Load data ----
-    dm  <- read_excel(file.path(path_adj, paste0(cc, "dataM_NA_TR2.xlsx")))
-    dq  <- read_excel(file.path(path_adj, paste0(cc, "dataQ_NA_TR2.xlsx")))
+    dm <- read_excel(
+      file.path(path_adj, paste0(cc, "dataM_NA_TR2.xlsx"))
+    )
     
-    # ---- select the correct time span
-    dm  <-  dm %>%
+    dq <- read_excel(
+      file.path(path_adj, paste0(cc, "dataQ_NA_TR2.xlsx"))
+    )
+    
+    # ---- Select the correct time span ----
+    dm <- dm %>%
       filter(Time >= start_lim & Time <= end_lim)
-    dq  <-  dq %>%
+    
+    dq <- dq %>%
       filter(Time >= start_lim & Time <= end_lim)
     
     # ---- Remove date column ----
@@ -221,123 +227,320 @@ select_vars <- function(countries, params, path_raw, path_adj,
     Yq <- as.data.frame(dq[, -1])
     
     # ---- Legend ----
-    leg <- read_excel(file.path(path_raw, paste0(cc, "data.xlsx")), sheet = "info")
+    leg <- read_excel(
+      file.path(path_raw, paste0(cc, "data.xlsx")),
+      sheet = "info"
+    )
+    
     TR   <- floor(floor(leg$TR2))
     freq <- leg$Frequency
     agg  <- leg$Aggregation
     
     # ---- Identify target quarterly variable ----
-    target_id <- grep(paste0("^", target, "_"), colnames(Yq))[1]
-    names_q   <- colnames(Yq)
+    target_id <- grep(
+      paste0("^", target, "_"),
+      colnames(Yq)
+    )[1]
     
-    # ---- Match quarterly dataset with legend ----
-    idx_leg_in_q <- match(tolower(names_q), tolower(leg$Name))
+    names_q <- colnames(Yq)
     
-    # ---- Identify quarterly series (all Q variables) ----
-    freq_q <- freq[idx_leg_in_q]
-    need_shift <- which(freq_q == "Q")
-    
-    # --------------------------------------------------------
-    # SHIFT TRIMESTRALI
-    # --------------------------------------------------------
-    
-    Yq_shifted_full <- as.data.frame(
-      apply(Yq, 2, function(col){
-        Y <- col                      # valori trimestrali
-        kronecker(Y, c(NA, NA, 1))         # monthly expansion: NA,NA,Y
-      })
-    )
-    
-    # estrai SOLO i mesi finali dei trimestri (3, 6, 9, ...)
-    rows_quarter_end <- seq(3, nrow(Yq_shifted_full), by = 3)
-    Yq_shifted <- Yq_shifted_full[rows_quarter_end, , drop = FALSE]
-    
-    # --------------------------------------------------------
-    # MONTHLY → QUARTERLY aggregation
-    # --------------------------------------------------------
-    
-    Y_mq <- agg_mq(Ym, agg)   # dimensione Tq
-    
-    Tq <- nrow(Y_mq)
-    
-    # ---- Target quarterly series (aligned) ----
-    y <- as.numeric(Yq_shifted[[target_id]])[1:Tq]
-    
-    # ---- Selection Method ----
+    # ---- Selection method ----
     method <- params$sel_method
     
-    #──────────────────────────────────────────────
-    # METHOD 1: CORR (pick top n correlations)
-    #──────────────────────────────────────────────
-    if (method == "corr") {
+    
+    # ========================================================================
+    # METHOD 0: NONE
+    # No country-specific preselection.
+    # Keep all monthly variables and all quarterly variables except the target.
+    # ========================================================================
+    
+    if (tolower(method) == "none") {
       
-      # -- Monthly --
-      cm <- abs(cor(Y_mq, y, use="pairwise.complete.obs"))
-      cm <- setNames(as.numeric(cm), colnames(Y_mq))
-      vars_m_base <- names(sort(cm, decreasing=TRUE))[1:params$n_m]
+      vars_m_base <- colnames(Ym)
+      vars_q_base <- colnames(Yq)[-target_id]
       
-      # -- Quarterly (shifted) --
-      cq <- abs(cor(Yq_shifted[1:Tq, -target_id, drop=FALSE], y, use="pairwise.complete.obs"))
-      cq <- setNames(as.numeric(cq), colnames(Yq_shifted)[-target_id])
-      vars_q_base <- names(sort(cq, decreasing=TRUE))[1:params$n_q]
       
-      #──────────────────────────────────────────────
-      # METHOD 2: CORRELATION THRESHOLD
-      #──────────────────────────────────────────────
-    } else if (method == "corr_threshold") {
+    } else {
       
-      cm <- abs(cor(Y_mq, y, use="pairwise.complete.obs"))
-      cm <- setNames(as.numeric(cm), colnames(Y_mq))
-      vars_m_base <- names(cm[cm >= params$thr_m])
       
-      cq <- abs(cor(Yq_shifted[1:Tq, -target_id, drop=FALSE], y, use="pairwise.complete.obs"))
-      cq <- setNames(as.numeric(cq), colnames(Yq_shifted)[-target_id])
-      vars_q_base <- names(cq[cq >= params$thr_q])
+      # ---- Match quarterly dataset with legend ----
+      idx_leg_in_q <- match(
+        tolower(names_q),
+        tolower(leg$Name)
+      )
       
-      #──────────────────────────────────────────────
-      # METHOD 3: F-TEST
-      #──────────────────────────────────────────────
-    } else if (method == "t_test") {
+      # ---- Identify quarterly series (all Q variables) ----
+      freq_q <- freq[idx_leg_in_q]
+      need_shift <- which(freq_q == "Q")
       
-      pvals_m <- sapply(1:ncol(Y_mq), function(j) {
-        f <- summary(lm(y ~ Y_mq[, j]))$fstatistic
-        pf(f[1], f[2], f[3], lower.tail = FALSE)
-      })
-      names(pvals_m) <- colnames(Y_mq)
-      vars_m_base <- names(pvals_m[pvals_m <= params$thr_F_test])
       
-      Yq_nt <- Yq_shifted[1:Tq, -target_id, drop=FALSE]
+      # --------------------------------------------------------
+      # SHIFT TRIMESTRALI
+      # --------------------------------------------------------
       
-      pvals_q <- sapply(1:ncol(Yq_nt), function(j) {
-        f <- summary(lm(y ~ Yq_nt[, j]))$fstatistic
-        pf(f[1], f[2], f[3], lower.tail = FALSE)
-      })
-      names(pvals_q) <- colnames(Yq_nt)
-      vars_q_base <- names(pvals_q[pvals_q <= params$thr_F_test])
+      Yq_shifted_full <- as.data.frame(
+        apply(
+          Yq,
+          2,
+          function(col) {
+            Y <- col
+            kronecker(Y, c(NA, NA, 1))
+          }
+        )
+      )
       
-      #──────────────────────────────────────────────
-      # METHOD 4: LASSO
-      #──────────────────────────────────────────────
-    } else if (method == "LASSO") {
+      # Estratto SOLO i mesi finali dei trimestri (3, 6, 9, ...)
+      rows_quarter_end <- seq(
+        3,
+        nrow(Yq_shifted_full),
+        by = 3
+      )
       
-      alpha <- params$alpha_lasso
+      Yq_shifted <- Yq_shifted_full[
+        rows_quarter_end,
+        ,
+        drop = FALSE
+      ]
       
-      # quarterly non-target block
-      Yq_nt <- Yq_shifted[1:Tq, -target_id, drop = FALSE]
       
-      # Monthly block
-      lambda_m <- LASSO_set(y = y, X = Y_mq, K = params$n_m, alpha = alpha)
-      vars_m_base <- LASSO_select(y = y, X = Y_mq, lambda = lambda_m,
-                                  K = params$n_m, alpha = alpha)
+      # --------------------------------------------------------
+      # MONTHLY -> QUARTERLY aggregation
+      # --------------------------------------------------------
       
-      # Quarterly block
-      lambda_q <- LASSO_set(y = y, X = Yq_nt, K = params$n_q, alpha = alpha)
-      vars_q_base <- LASSO_select(y = y, X = Yq_nt, lambda = lambda_q,
-                                  K = params$n_q, alpha = alpha)
+      Y_mq <- agg_mq(
+        Ym,
+        agg
+      )
+      
+      Tq <- nrow(Y_mq)
+      
+      # ---- Target quarterly series (aligned) ----
+      y <- as.numeric(
+        Yq_shifted[[target_id]]
+      )[1:Tq]
+      
+      
+      # ======================================================================
+      # METHOD 1: CORR
+      # Pick top n correlations
+      # ======================================================================
+      
+      if (method == "corr") {
+        
+        # -- Monthly --
+        cm <- abs(
+          cor(
+            Y_mq,
+            y,
+            use = "pairwise.complete.obs"
+          )
+        )
+        
+        cm <- setNames(
+          as.numeric(cm),
+          colnames(Y_mq)
+        )
+        
+        vars_m_base <- names(
+          sort(
+            cm,
+            decreasing = TRUE
+          )
+        )[1:params$n_m]
+        
+        
+        # -- Quarterly (shifted) --
+        cq <- abs(
+          cor(
+            Yq_shifted[
+              1:Tq,
+              -target_id,
+              drop = FALSE
+            ],
+            y,
+            use = "pairwise.complete.obs"
+          )
+        )
+        
+        cq <- setNames(
+          as.numeric(cq),
+          colnames(Yq_shifted)[-target_id]
+        )
+        
+        vars_q_base <- names(
+          sort(
+            cq,
+            decreasing = TRUE
+          )
+        )[1:params$n_q]
+        
+        
+        # ====================================================================
+        # METHOD 2: CORRELATION THRESHOLD
+        # ====================================================================
+        
+      } else if (method == "corr_threshold") {
+        
+        cm <- abs(
+          cor(
+            Y_mq,
+            y,
+            use = "pairwise.complete.obs"
+          )
+        )
+        
+        cm <- setNames(
+          as.numeric(cm),
+          colnames(Y_mq)
+        )
+        
+        vars_m_base <- names(
+          cm[cm >= params$thr_m]
+        )
+        
+        
+        cq <- abs(
+          cor(
+            Yq_shifted[
+              1:Tq,
+              -target_id,
+              drop = FALSE
+            ],
+            y,
+            use = "pairwise.complete.obs"
+          )
+        )
+        
+        cq <- setNames(
+          as.numeric(cq),
+          colnames(Yq_shifted)[-target_id]
+        )
+        
+        vars_q_base <- names(
+          cq[cq >= params$thr_q]
+        )
+        
+        
+        # ====================================================================
+        # METHOD 3: F-TEST
+        # ====================================================================
+        
+      } else if (method == "t_test") {
+        
+        pvals_m <- sapply(
+          1:ncol(Y_mq),
+          function(j) {
+            
+            f <- summary(
+              lm(y ~ Y_mq[, j])
+            )$fstatistic
+            
+            pf(
+              f[1],
+              f[2],
+              f[3],
+              lower.tail = FALSE
+            )
+          }
+        )
+        
+        names(pvals_m) <- colnames(Y_mq)
+        
+        vars_m_base <- names(
+          pvals_m[
+            pvals_m <= params$thr_F_test
+          ]
+        )
+        
+        
+        Yq_nt <- Yq_shifted[
+          1:Tq,
+          -target_id,
+          drop = FALSE
+        ]
+        
+        
+        pvals_q <- sapply(
+          1:ncol(Yq_nt),
+          function(j) {
+            
+            f <- summary(
+              lm(y ~ Yq_nt[, j])
+            )$fstatistic
+            
+            pf(
+              f[1],
+              f[2],
+              f[3],
+              lower.tail = FALSE
+            )
+          }
+        )
+        
+        names(pvals_q) <- colnames(Yq_nt)
+        
+        vars_q_base <- names(
+          pvals_q[
+            pvals_q <= params$thr_F_test
+          ]
+        )
+        
+        
+        # ====================================================================
+        # METHOD 4: LASSO
+        # ====================================================================
+        
+      } else if (method == "LASSO") {
+        
+        alpha <- params$alpha_lasso
+        
+        # Quarterly non-target block
+        Yq_nt <- Yq_shifted[
+          1:Tq,
+          -target_id,
+          drop = FALSE
+        ]
+        
+        
+        # Monthly block
+        lambda_m <- LASSO_set(
+          y     = y,
+          X     = Y_mq,
+          K     = params$n_m,
+          alpha = alpha
+        )
+        
+        vars_m_base <- LASSO_select(
+          y      = y,
+          X      = Y_mq,
+          lambda = lambda_m,
+          K      = params$n_m,
+          alpha  = alpha
+        )
+        
+        
+        # Quarterly block
+        lambda_q <- LASSO_set(
+          y     = y,
+          X     = Yq_nt,
+          K     = params$n_q,
+          alpha = alpha
+        )
+        
+        vars_q_base <- LASSO_select(
+          y      = y,
+          X      = Yq_nt,
+          lambda = lambda_q,
+          K      = params$n_q,
+          alpha  = alpha
+        )
+      }
     }
-    #──────────────────────────────────────────────
+    
+    
+    # ========================================================================
     # FINALIZE
-    #──────────────────────────────────────────────
+    # ========================================================================
     
     vars_m_cc <- vars_m_base
     vars_q_cc <- vars_q_base
@@ -345,15 +548,20 @@ select_vars <- function(countries, params, path_raw, path_adj,
     target_cc <- colnames(Yq)[target_id]
     
     sel_m[[cc]] <- vars_m_cc
-    sel_q[[cc]] <- c(target_cc, vars_q_cc)
+    sel_q[[cc]] <- c(
+      target_cc,
+      vars_q_cc
+    )
   }
   
-  return(list(
-    m = sel_m,
-    q = sel_q
-  ))
+  
+  return(
+    list(
+      m = sel_m,
+      q = sel_q
+    )
+  )
 }
-
 
 # ==============================================================================
 # PREPARE DATA FOR A SINGLE COUNTRY

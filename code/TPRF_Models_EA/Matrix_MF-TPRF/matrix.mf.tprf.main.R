@@ -107,7 +107,7 @@ params <- list(
   
   proxy_mode = "scalar",   # "scalar" | "multivariate"
   
-  sel_method  = "LASSO",   # "LASSO" | "corr" 
+  sel_method = "corr",   # "none" | "LASSO" | "corr" |
   n_m         = 20,        # 20  |  25  | 30
   n_q         = 5,         # 5   |  15  | 30
   thr_m       = 0.10,
@@ -136,6 +136,12 @@ proxy_mode <- match.arg(
 model_name <- paste0("matrix_", proxy_mode)
 Size       <- get_size_tag(params$n_m, params$n_q)
 sel        <- params$sel_method
+
+Size <- if (tolower(sel) == "none") {
+  "full"
+} else {
+  get_size_tag(params$n_m, params$n_q)
+}
 
 countries <- c(
   "DE", "FR", "IT", "ES",

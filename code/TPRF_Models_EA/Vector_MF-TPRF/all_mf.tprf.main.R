@@ -79,7 +79,7 @@ params <- list(
   
   target       = "GDP",
   
-  sel_method   = "corr",  # "corr" | "LASSO"
+  sel_method   = "LASSO",  # "none" | "corr" | "LASSO"
   n_m          = 20,
   n_q          = 5,
   thr_m        = 0.10,
@@ -102,12 +102,21 @@ params <- list(
 countries <- c("DE", "FR", "IT", "ES", "NL", "BE", "AT", "PT", "EA")
 country   <- "IT"
 
-tag_run <- build_run_tag(params)
-
 model_name <- "vector"
-Size       <- get_size_tag(params$n_m, params$n_q)
-sel        <- params$sel_method
 
+Size <- if (tolower(params$sel_method) == "none") {
+  "full"
+} else {
+  get_size_tag(params$n_m, params$n_q)
+}
+
+sel <- params$sel_method
+
+tag_run <- if (tolower(params$sel_method) == "none") {
+  "full_none"
+} else {
+  build_run_tag(params)
+}
 # ==============================================================================
 # 4. PREPARE DATA FOR ALL COUNTRIES
 # ==============================================================================
@@ -289,6 +298,18 @@ writeLines(cross_out$latex_tab_rt_all,       con = file_tex_rt)
 # 8. SAVE SUMMARY OBJECT
 # ==============================================================================
 
+N_m_save <- if (tolower(params$sel_method) == "none") {
+  NA_integer_
+} else {
+  params$n_m
+}
+
+N_q_save <- if (tolower(params$sel_method) == "none") {
+  NA_integer_
+} else {
+  params$n_q
+}
+
 file_summary_cross <- build_result_filename(
   path_out         = path_results,
   model            = model_name,
@@ -296,8 +317,8 @@ file_summary_cross <- build_result_filename(
   Size             = Size,
   sel              = sel,
   countries        = countries,
-  N_m              = params$n_m,
-  N_q              = params$n_q,
+  N_m              = N_m_save,
+  N_q              = N_q_save,
   Lproxy           = NA,
   L_midas          = NA,
   p_ar             = NA,
@@ -313,6 +334,18 @@ file_summary_cross <- build_result_filename(
 
 if (file.exists(file_summary_cross)) file.remove(file_summary_cross)
 
+dimensions_by_country <- lapply(countries, function(cc) {
+  
+  obj <- all_countries$data[[cc]]
+  
+  list(
+    N_m = obj$nM,
+    N_q = obj$nQ - 1L,
+    N   = obj$nM + obj$nQ - 1L
+  )
+})
+
+names(dimensions_by_country) <- countries
 saveRDS(
   list(
     model_id               = "MF_TPRF",
@@ -322,6 +355,9 @@ saveRDS(
     sel                    = sel,
     params                 = params,
     countries              = countries,
+    countries              = countries,
+    dimensions_by_country  = dimensions_by_country,
+    tag_run                = tag_run,
     tag_run                = tag_run,
     missing_by_country     = missing_by_country,
     
